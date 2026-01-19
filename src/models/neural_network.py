@@ -29,6 +29,7 @@ CONFIGS = {
         "batch_size": 32,
         "dropout_rate": 0.1,
         "patience": 50,
+        "use_log_target": False,
     },
     "resilient_irradiance": {
         "hidden_layers": [256, 128, 64],
@@ -37,6 +38,7 @@ CONFIGS = {
         "batch_size": 32,
         "dropout_rate": 0.2,
         "patience": 50,
+        "use_log_target": False,
     },
     "resilient_precipitation": {
         "hidden_layers": [32],
@@ -45,6 +47,7 @@ CONFIGS = {
         "batch_size": 32,
         "dropout_rate": 0.0,
         "patience": 150,
+        "use_log_target": False,  # Log transform didn't help
     },
 }
 
@@ -74,10 +77,67 @@ class WeatherPredictor(nn.Module):
         return self.net(x)
 
 # =========================
+# Preprocessing
+# =========================
+
+def add_cyclical_encoding(df):
+    """Convert month/season to cyclical sin/cos features."""
+    if "month" in df.columns:
+        df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+        df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+        df.drop("month", axis=1, inplace=True)
+
+    if "season" in df.columns:
+        # Map season to numeric first
+        if df["season"].dtype == object:
+            season_map = {"winter":1, "spring":2, "summer":3, "fall":4, "autumn":4}
+            df["season"] = df["season"].str.lower().map(season_map)
+        df["season_sin"] = np.sin(2 * np.pi * df["season"] / 4)
+        df["season_cos"] = np.cos(2 * np.pi * df["season"] / 4)
+        df.drop("season", axis=1, inplace=True)
+
+    return df
+
+
+def add_lag_differences(df, prefix):
+    """Add rate of change features from lag columns."""
+    # Find lag columns
+    lag_cols = [c for c in df.columns if f"{prefix}_previous_day" in c]
+    lag_cols = sorted(lag_cols, key=lambda x: int(x.split("day")[-1]))
+
+    if len(lag_cols) >= 2:
+        # 1-day change
+        df[f"{prefix}_change_1d"] = df[lag_cols[0]] - df[lag_cols[1]]
+    if len(lag_cols) >= 7:
+        # 7-day change (trend)
+        df[f"{prefix}_change_7d"] = df[lag_cols[0]] - df[lag_cols[6]]
+        # Rolling std (volatility)
+        df[f"{prefix}_std_7d"] = df[lag_cols].std(axis=1)
+
+    return df
+
+
+def preprocess_features(df, target_name=None):
+    """Apply NN-specific preprocessing."""
+    df = df.copy()
+
+    # Cyclical encoding for time features
+    df = add_cyclical_encoding(df)
+
+    # Add lag differences for each lag feature type
+    for col in df.columns:
+        if "_previous_day1" in col:
+            prefix = col.replace("_previous_day1", "")
+            df = add_lag_differences(df, prefix)
+
+    return df
+
+
+# =========================
 # Data Loader
 # =========================
 
-def load_dataset(folder, target_cols, drop_cols):
+def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
 
     base = PROJECT_ROOT / f"data/{folder}"
 
@@ -87,10 +147,9 @@ def load_dataset(folder, target_cols, drop_cols):
     train_df["date"] = pd.to_datetime(train_df["date"])
     test_df["date"] = pd.to_datetime(test_df["date"])
 
-    if "season" in train_df.columns:
-        season_map = {"winter":1, "spring":2, "summer":3, "fall":4, "autumn":4}
-        train_df["season"] = train_df["season"].str.lower().map(season_map)
-        test_df["season"] = test_df["season"].str.lower().map(season_map)
+    # Apply NN-specific preprocessing
+    train_df = preprocess_features(train_df)
+    test_df = preprocess_features(test_df)
 
     feature_cols = [
         c for c in train_df.columns
@@ -102,7 +161,12 @@ def load_dataset(folder, target_cols, drop_cols):
     X_test = test_df[feature_cols].fillna(0).values
     y_test = test_df[target_cols].values
 
-    return X_train, y_train, X_test, y_test, feature_cols
+    # Apply log transform to target if requested (for skewed data like precipitation)
+    if use_log_target:
+        y_train = np.log1p(y_train)  # log(1 + x) to handle zeros
+        y_test = np.log1p(y_test)
+
+    return X_train, y_train, X_test, y_test, feature_cols, use_log_target
 
 # =========================
 # Training & Evaluation
@@ -120,9 +184,10 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
     print(f"  Learning rate: {cfg['learning_rate']}")
     print(f"  Batch size: {cfg['batch_size']}")
     print(f"  Dropout: {cfg['dropout_rate']}")
+    print(f"  Log target: {cfg['use_log_target']}")
 
-    X_train_full, y_train_full, X_test, y_test, features = load_dataset(
-        folder, targets, drop_cols
+    X_train_full, y_train_full, X_test, y_test, features, use_log = load_dataset(
+        folder, targets, drop_cols, use_log_target=cfg['use_log_target']
     )
 
     # Split into train/validation
@@ -240,6 +305,11 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
 
     preds_orig = scaler_y.inverse_transform(preds)
     y_test_orig = scaler_y.inverse_transform(y_test_s)
+
+    # Inverse log transform if used
+    if use_log:
+        preds_orig = np.expm1(preds_orig)  # exp(x) - 1, inverse of log1p
+        y_test_orig = np.expm1(y_test_orig)
 
     mse = mean_squared_error(y_test_orig, preds_orig)
     r2 = r2_score(y_test_orig, preds_orig)
