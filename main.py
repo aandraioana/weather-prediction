@@ -12,6 +12,7 @@ Usage:
 
 Commands:
     train       - Train the linear regression model (default)
+    nn          - Train the neural network model
     features    - Run feature engineering
     importance  - Analyze feature importance
     anomalies   - Run anomaly detection
@@ -35,6 +36,7 @@ def main():
 
     commands = {
         "train": "src/models/linear_regression.py",
+        "nn": "src/models/neural_network.py",
         "features": "src/features/engineering.py",
         "importance": "src/features/importance.py",
         "anomalies": "src/exploration/anomalies.py",
