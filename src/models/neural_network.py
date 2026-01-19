@@ -39,12 +39,12 @@ CONFIGS = {
         "patience": 50,
     },
     "resilient_precipitation": {
-        "hidden_layers": [64, 32],
-        "learning_rate": 0.0005,
-        "epochs": 1500,
-        "batch_size": 16,
-        "dropout_rate": 0.1,
-        "patience": 100,
+        "hidden_layers": [32],
+        "learning_rate": 0.001,
+        "epochs": 2000,
+        "batch_size": 32,
+        "dropout_rate": 0.0,
+        "patience": 150,
     },
 }
 
