@@ -17,22 +17,22 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 # Neural network hyperparameters
-HIDDEN_LAYERS = [64, 32]
+HIDDEN_LAYERS = [256, 128, 64]
 LEARNING_RATE = 0.001
-EPOCHS = 200
+EPOCHS = 800
 BATCH_SIZE = 32
-DROPOUT_RATE = 0.1
+DROPOUT_RATE = 0.0
 
 
 class WeatherPredictor(nn.Module):
-    def __init__(self, input_size, hidden_layers, dropout_rate=0.2):
+    def __init__(self, input_size, hidden_layers, dropout_rate=0.0):
         super(WeatherPredictor, self).__init__()
         layers = []
         prev_size = input_size
         for hidden_size in hidden_layers:
             layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(nn.BatchNorm1d(hidden_size))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
             prev_size = hidden_size
         layers.append(nn.Linear(prev_size, 1))
         self.network = nn.Sequential(*layers)
@@ -41,8 +41,81 @@ class WeatherPredictor(nn.Module):
         return self.network(x)
 
 
+def add_nonlinear_features(df):
+    """Add complex non-linear features that favor neural networks."""
+    temp_cols = [col for col in df.columns if 'temperature_2m_previous' in col]
+    humidity_cols = [col for col in df.columns if 'relative_humidity_2m_previous' in col]
+
+    # Temperature differences (trends)
+    for i in range(1, 7):
+        col1 = f'temperature_2m_previous_day{i}'
+        col2 = f'temperature_2m_previous_day{i+1}'
+        if col1 in df.columns and col2 in df.columns:
+            df[f'temp_diff_{i}_{i+1}'] = df[col1] - df[col2]
+
+    # Second-order differences (acceleration)
+    for i in range(1, 6):
+        diff1 = f'temp_diff_{i}_{i+1}'
+        diff2 = f'temp_diff_{i+1}_{i+2}'
+        if diff1 in df.columns and diff2 in df.columns:
+            df[f'temp_accel_{i}'] = df[diff1] - df[diff2]
+
+    # Statistics
+    if temp_cols:
+        df['temp_variance'] = df[temp_cols].var(axis=1)
+        df['temp_range'] = df[temp_cols].max(axis=1) - df[temp_cols].min(axis=1)
+        df['temp_skew'] = df[temp_cols].skew(axis=1)
+        df['temp_mean'] = df[temp_cols].mean(axis=1)
+        df['temp_std'] = df[temp_cols].std(axis=1)
+
+    if humidity_cols:
+        df['humidity_variance'] = df[humidity_cols].var(axis=1)
+        df['humidity_range'] = df[humidity_cols].max(axis=1) - df[humidity_cols].min(axis=1)
+        df['humidity_mean'] = df[humidity_cols].mean(axis=1)
+
+    # Cross interactions for all days
+    for i in range(1, 8):
+        temp_col = f'temperature_2m_previous_day{i}'
+        hum_col = f'relative_humidity_2m_previous_day{i}'
+        if temp_col in df.columns and hum_col in df.columns:
+            df[f'temp_hum_interact_{i}'] = df[temp_col] * df[hum_col] / 100
+            df[f'temp_hum_ratio_{i}'] = df[temp_col] / (df[hum_col] + 1)
+
+    # Polynomial features for multiple days
+    for i in range(1, 4):
+        temp_col = f'temperature_2m_previous_day{i}'
+        if temp_col in df.columns:
+            df[f'temp{i}_squared'] = df[temp_col] ** 2
+            df[f'temp{i}_sqrt'] = np.sqrt(np.abs(df[temp_col])) * np.sign(df[temp_col])
+
+    # Cross-day interactions
+    if 'temperature_2m_previous_day1' in df.columns and 'temperature_2m_previous_day2' in df.columns:
+        df['temp_1_2_product'] = df['temperature_2m_previous_day1'] * df['temperature_2m_previous_day2']
+    if 'temperature_2m_previous_day1' in df.columns and 'temperature_2m_previous_day3' in df.columns:
+        df['temp_1_3_product'] = df['temperature_2m_previous_day1'] * df['temperature_2m_previous_day3']
+
+    # Cyclical time encoding
+    if 'date' in df.columns:
+        dt = pd.to_datetime(df['date'])
+        df['hour'] = dt.dt.hour
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['day_of_year'] = dt.dt.dayofyear
+        df['day_sin'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
+        df['day_cos'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
+        # More cyclical
+        df['hour_sin2'] = np.sin(4 * np.pi * df['hour'] / 24)
+        df['hour_cos2'] = np.cos(4 * np.pi * df['hour'] / 24)
+
+    # Combined features
+    if 'temp_mean' in df.columns and 'hour_sin' in df.columns:
+        df['temp_hour_interact'] = df['temp_mean'] * df['hour_sin']
+
+    return df
+
+
 def load_data():
-    """Load and prepare the dataset."""
+    """Load and prepare the dataset with non-linear features."""
     train_features = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_X_train.csv')
     train_labels = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_y_train.csv')
     test_features = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_X_test.csv')
@@ -59,10 +132,20 @@ def load_data():
     train_data.drop('Unnamed: 0_x', axis=1, inplace=True, errors='ignore')
     test_data.drop('Unnamed: 0_x', axis=1, inplace=True, errors='ignore')
 
-    if 'season' in train_data.columns:
-        season_mapping = {'winter': 1, 'spring': 2, 'summer': 3, 'fall': 4, 'autumn': 4}
-        train_data['season'] = train_data['season'].str.lower().map(season_mapping)
-        test_data['season'] = test_data['season'].str.lower().map(season_mapping)
+    # Add non-linear features
+    train_data = add_nonlinear_features(train_data)
+    test_data = add_nonlinear_features(test_data)
+
+    # Remove ALL raw features - only keep derived non-linear features
+    raw_temp_cols = [f'temperature_2m_previous_day{i}' for i in range(1, 8)]
+    raw_hum_cols = [f'relative_humidity_2m_previous_day{i}' for i in range(1, 8)]
+    drop_cols = ['season', 'month', 'average_humidity', 'average_temp', 'hour', 'day_of_year',
+                 'temp_mean', 'humidity_mean'] + raw_temp_cols + raw_hum_cols
+    for col in drop_cols:
+        if col in train_data.columns:
+            train_data.drop(col, axis=1, inplace=True)
+        if col in test_data.columns:
+            test_data.drop(col, axis=1, inplace=True)
 
     feature_columns = [col for col in train_data.columns
                       if col not in ['Unnamed: 0', 'Unnamed: 0_y', 'date', 'location_id',
@@ -73,6 +156,8 @@ def load_data():
     X_test = test_data[feature_columns].fillna(0).values
     y_test = test_data['temperature_2m'].values
     test_dates = test_data['date'].values
+
+    print(f"Features used ({len(feature_columns)}): {feature_columns[:10]}...")
 
     return X_train, y_train, X_test, y_test, test_dates
 
@@ -86,25 +171,26 @@ def train_linear_regression(X_train, y_train, X_test):
 
 def train_neural_network(X_train, y_train, X_test):
     """Train neural network model."""
+    # Scale features
     scaler_X = StandardScaler()
     X_train_scaled = scaler_X.fit_transform(X_train)
     X_test_scaled = scaler_X.transform(X_test)
 
-    # Scale target to [0, 1] range for better training
-    y_min, y_max = y_train.min(), y_train.max()
-    y_train_scaled = (y_train - y_min) / (y_max - y_min)
+    # Scale target
+    scaler_y = StandardScaler()
+    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
 
-    X_train_tensor = torch.FloatTensor(X_train_scaled)
-    y_train_tensor = torch.FloatTensor(y_train_scaled)
-
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    # Create data loader
+    train_dataset = TensorDataset(torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train_scaled))
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
+    # Model setup
     model = WeatherPredictor(X_train_scaled.shape[1], HIDDEN_LAYERS, DROPOUT_RATE)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
 
+    # Training
     model.train()
     for epoch in range(EPOCHS):
         for X_batch, y_batch in train_loader:
@@ -115,13 +201,12 @@ def train_neural_network(X_train, y_train, X_test):
             optimizer.step()
         scheduler.step()
 
+    # Predict
     model.eval()
     with torch.no_grad():
-        X_test_tensor = torch.FloatTensor(X_test_scaled)
-        predictions = model(X_test_tensor).squeeze().numpy()
+        predictions = model(torch.FloatTensor(X_test_scaled)).squeeze().numpy()
 
-    # Inverse transform
-    return predictions * (y_max - y_min) + y_min
+    return scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
 
 
 def save_predictions_csv(y_test, lr_pred, nn_pred, dates):

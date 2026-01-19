@@ -13,16 +13,18 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+torch.backends.cudnn.deterministic = True
 
 # Tunable hyperparameters
 HIDDEN_LAYERS = [64, 32]
 LEARNING_RATE = 0.001
-EPOCHS = 200
+EPOCHS = 500
 BATCH_SIZE = 32
-DROPOUT_RATE = 0.1
+DROPOUT_RATE = 0.0
+
 
 class WeatherPredictor(nn.Module):
-    def __init__(self, input_size, hidden_layers, dropout_rate=0.2):
+    def __init__(self, input_size, hidden_layers, dropout_rate=0.1):
         super(WeatherPredictor, self).__init__()
 
         layers = []
@@ -30,12 +32,13 @@ class WeatherPredictor(nn.Module):
 
         for hidden_size in hidden_layers:
             layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(nn.BatchNorm1d(hidden_size))
             layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))
+            if dropout_rate > 0:
+                layers.append(nn.Dropout(dropout_rate))
             prev_size = hidden_size
 
         layers.append(nn.Linear(prev_size, 1))
-
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -82,22 +85,59 @@ def load_and_prepare_data():
     return X_train, y_train, X_test, y_test, feature_columns
 
 
-def train_model(model, train_loader, criterion, optimizer, epochs):
-    model.train()
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, epochs, patience):
+    best_val_loss = float('inf')
+    patience_counter = 0
+    best_model_state = None
 
     for epoch in range(epochs):
-        total_loss = 0
+        # Training phase
+        model.train()
+        train_loss = 0
         for X_batch, y_batch in train_loader:
             optimizer.zero_grad()
             predictions = model(X_batch).squeeze()
             loss = criterion(predictions, y_batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
             optimizer.step()
-            total_loss += loss.item()
+            train_loss += loss.item()
 
-        if (epoch + 1) % 20 == 0:
-            avg_loss = total_loss / len(train_loader)
-            print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                predictions = model(X_batch).squeeze()
+                loss = criterion(predictions, y_batch)
+                val_loss += loss.item()
+
+        avg_train_loss = train_loss / len(train_loader)
+        avg_val_loss = val_loss / len(val_loader)
+
+        # Learning rate scheduling
+        scheduler.step(avg_val_loss)
+
+        # Early stopping check
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            patience_counter = 0
+            best_model_state = model.state_dict().copy()
+        else:
+            patience_counter += 1
+
+        if (epoch + 1) % 50 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, LR: {current_lr:.6f}")
+
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    print(f"Best validation loss: {best_val_loss:.4f}")
 
 
 def evaluate_model(model, X_test, y_test, scaler_y):
@@ -123,7 +163,7 @@ def evaluate_model(model, X_test, y_test, scaler_y):
 
 def main():
     print("=" * 60)
-    print("NEURAL NETWORK - Weather Prediction")
+    print("NEURAL NETWORK - Weather Prediction (Tuned)")
     print("=" * 60)
     print(f"\nHyperparameters:")
     print(f"  Hidden layers: {HIDDEN_LAYERS}")
@@ -133,38 +173,56 @@ def main():
     print(f"  Dropout rate: {DROPOUT_RATE}")
     print()
 
-    X_train, y_train, X_test, y_test, feature_columns = load_and_prepare_data()
-    print(f"Training samples: {len(X_train)}")
+    X_train_full, y_train_full, X_test, y_test, feature_columns = load_and_prepare_data()
+
+    print(f"Training samples: {len(X_train_full)}")
     print(f"Test samples: {len(X_test)}")
     print(f"Features: {len(feature_columns)}")
 
-
+    # Scale features
     scaler_X = StandardScaler()
-    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_train_scaled = scaler_X.fit_transform(X_train_full)
     X_test_scaled = scaler_X.transform(X_test)
 
+    # Scale target
     scaler_y = StandardScaler()
-    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+    y_train_scaled = scaler_y.fit_transform(y_train_full.reshape(-1, 1)).flatten()
     y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
 
-
-    X_train_tensor = torch.FloatTensor(X_train_scaled)
-    y_train_tensor = torch.FloatTensor(y_train_scaled)
-
-
-    train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+    # Create data loader
+    train_dataset = TensorDataset(torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train_scaled))
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-
+    # Initialize model
     input_size = X_train_scaled.shape[1]
     model = WeatherPredictor(input_size, HIDDEN_LAYERS, DROPOUT_RATE)
     print(f"\nModel architecture:\n{model}")
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters()):,}")
 
+    # Loss and optimizer with scheduler
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
 
+    # Simple training without validation
     print("\nTraining...")
-    train_model(model, train_loader, criterion, optimizer, EPOCHS)
+    model.train()
+    for epoch in range(EPOCHS):
+        total_loss = 0
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            predictions = model(X_batch).squeeze()
+            loss = criterion(predictions, y_batch)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+
+        scheduler.step()
+
+        if (epoch + 1) % 100 == 0:
+            avg_loss = total_loss / len(train_loader)
+            lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch [{epoch+1}/{EPOCHS}], Loss: {avg_loss:.4f}, LR: {lr:.6f}")
 
     evaluate_model(model, X_test_scaled, y_test_scaled, scaler_y)
 
