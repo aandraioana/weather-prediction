@@ -18,13 +18,35 @@ SEED = 42
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-HIDDEN_LAYERS = [128, 64, 32]
-LEARNING_RATE = 0.001
-EPOCHS = 1000
-BATCH_SIZE = 32
-DROPOUT_RATE = 0.1
-PATIENCE = 50  # Early stopping patience
-VAL_SPLIT = 0.2  # Validation split ratio
+VAL_SPLIT = 0.2
+
+# Per-dataset configurations
+CONFIGS = {
+    "savanna_temperature": {
+        "hidden_layers": [128, 64, 32],
+        "learning_rate": 0.001,
+        "epochs": 1000,
+        "batch_size": 32,
+        "dropout_rate": 0.1,
+        "patience": 50,
+    },
+    "resilient_irradiance": {
+        "hidden_layers": [256, 128, 64],
+        "learning_rate": 0.001,
+        "epochs": 1000,
+        "batch_size": 32,
+        "dropout_rate": 0.2,
+        "patience": 50,
+    },
+    "resilient_precipitation": {
+        "hidden_layers": [64, 32],
+        "learning_rate": 0.0005,
+        "epochs": 1500,
+        "batch_size": 16,
+        "dropout_rate": 0.1,
+        "patience": 100,
+    },
+}
 
 # =========================
 # Model
@@ -86,11 +108,18 @@ def load_dataset(folder, target_cols, drop_cols):
 # Training & Evaluation
 # =========================
 
-def run_experiment(name, folder, targets, drop_cols):
+def run_experiment(name, folder, targets, drop_cols, config_name):
+
+    cfg = CONFIGS[config_name]
 
     print("\n" + "="*70)
     print(f"Dataset: {name}")
     print("="*70)
+    print(f"Config: {config_name}")
+    print(f"  Hidden layers: {cfg['hidden_layers']}")
+    print(f"  Learning rate: {cfg['learning_rate']}")
+    print(f"  Batch size: {cfg['batch_size']}")
+    print(f"  Dropout: {cfg['dropout_rate']}")
 
     X_train_full, y_train_full, X_test, y_test, features = load_dataset(
         folder, targets, drop_cols
@@ -128,22 +157,22 @@ def run_experiment(name, folder, targets, drop_cols):
         torch.FloatTensor(y_val_s)
     )
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=cfg['batch_size'], shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=cfg['batch_size'], shuffle=False)
 
     # Initialize model
     model = WeatherPredictor(
         input_size=X_train_s.shape[1],
-        hidden_layers=HIDDEN_LAYERS,
+        hidden_layers=cfg['hidden_layers'],
         output_size=y_train.shape[1],
-        dropout_rate=DROPOUT_RATE
+        dropout_rate=cfg['dropout_rate']
     )
 
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=20, verbose=False
     )
@@ -154,7 +183,7 @@ def run_experiment(name, folder, targets, drop_cols):
     patience_counter = 0
     best_model_state = None
 
-    for epoch in range(EPOCHS):
+    for epoch in range(cfg['epochs']):
         # Training phase
         model.train()
         train_loss = 0
@@ -192,9 +221,9 @@ def run_experiment(name, folder, targets, drop_cols):
 
         if (epoch+1) % 100 == 0:
             lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch+1}/{EPOCHS} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {lr:.6f}")
+            print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {lr:.6f}")
 
-        if patience_counter >= PATIENCE:
+        if patience_counter >= cfg['patience']:
             print(f"Early stopping at epoch {epoch+1}")
             break
 
@@ -247,10 +276,11 @@ def run_experiment(name, folder, targets, drop_cols):
 def main():
 
     run_experiment(
-        name="Savanna Preserve",
+        name="Savanna Preserve - Temperature",
         folder="savanna_preserve",
         targets=["temperature_2m"],
-        drop_cols=["relative_humidity_2m"]
+        drop_cols=["relative_humidity_2m"],
+        config_name="savanna_temperature"
     )
 
     # Urban Air dataset skipped - only 168 samples with poor train/test split
@@ -259,14 +289,16 @@ def main():
         name="Resilient Fields - Irradiance",
         folder="resilient_fields",
         targets=["global_tilted_irradiance"],
-        drop_cols=["precipitation"]
+        drop_cols=["precipitation"],
+        config_name="resilient_irradiance"
     )
 
     run_experiment(
         name="Resilient Fields - Precipitation",
         folder="resilient_fields",
         targets=["precipitation"],
-        drop_cols=["global_tilted_irradiance"]
+        drop_cols=["global_tilted_irradiance"],
+        config_name="resilient_precipitation"
     )
 
 if __name__ == "__main__":
