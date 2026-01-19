@@ -13,6 +13,7 @@ Usage:
 Commands:
     train       - Train the linear regression model (default)
     nn          - Train the neural network model
+    compare     - Compare linear regression vs neural network
     features    - Run feature engineering
     importance  - Analyze feature importance
     anomalies   - Run anomaly detection
@@ -35,8 +36,9 @@ def main():
     command = sys.argv[1] if len(sys.argv) > 1 else "train"
 
     commands = {
-        "train": "src/models/linear_regression.py",
+        "linear": "src/models/linear_regression.py",
         "nn": "src/models/neural_network.py",
+        "compare": "src/models/compare.py",
         "features": "src/features/engineering.py",
         "importance": "src/features/importance.py",
         "anomalies": "src/exploration/anomalies.py",

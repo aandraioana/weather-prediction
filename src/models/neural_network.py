@@ -9,12 +9,17 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
+# Random seed for reproducibility
+SEED = 42
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
-HIDDEN_LAYERS = [64, 32]  # Number of neurons in each hidden layer
+# Tunable hyperparameters
+HIDDEN_LAYERS = [64, 32]
 LEARNING_RATE = 0.001
-EPOCHS = 100
+EPOCHS = 200
 BATCH_SIZE = 32
-DROPOUT_RATE = 0.2
+DROPOUT_RATE = 0.1
 
 class WeatherPredictor(nn.Module):
     def __init__(self, input_size, hidden_layers, dropout_rate=0.2):
