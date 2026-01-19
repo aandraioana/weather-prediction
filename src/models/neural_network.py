@@ -55,26 +55,15 @@ class WeatherPredictor(nn.Module):
 # Data Loader
 # =========================
 
-def load_dataset(folder, prefix, target_cols, drop_cols):
+def load_dataset(folder, target_cols, drop_cols):
 
     base = PROJECT_ROOT / f"data/{folder}"
 
-    X_train_df = pd.read_csv(base / f"{prefix}_X_train.csv")
-    y_train_df = pd.read_csv(base / f"{prefix}_y_train.csv")
-    X_test_df  = pd.read_csv(base / f"{prefix}_X_test.csv")
-    y_test_df  = pd.read_csv(base / f"{prefix}_y_test.csv")
+    train_df = pd.read_csv(base / "train.csv")
+    test_df = pd.read_csv(base / "test.csv")
 
-    for df in [X_train_df, y_train_df, X_test_df, y_test_df]:
-        df["date"] = pd.to_datetime(df["date"])
-
-    train_df = pd.merge(X_train_df, y_train_df, on=["date", "location_id"], how="inner")
-    test_df  = pd.merge(X_test_df,  y_test_df,  on=["date", "location_id"], how="inner")
-
-    # Drop all unnamed index columns
-    drop_unnamed = [c for c in train_df.columns if 'Unnamed' in c]
-    train_df.drop(columns=drop_unnamed, errors="ignore", inplace=True)
-    drop_unnamed = [c for c in test_df.columns if 'Unnamed' in c]
-    test_df.drop(columns=drop_unnamed, errors="ignore", inplace=True)
+    train_df["date"] = pd.to_datetime(train_df["date"])
+    test_df["date"] = pd.to_datetime(test_df["date"])
 
     if "season" in train_df.columns:
         season_map = {"winter":1, "spring":2, "summer":3, "fall":4, "autumn":4}
@@ -88,8 +77,8 @@ def load_dataset(folder, prefix, target_cols, drop_cols):
 
     X_train = train_df[feature_cols].fillna(0).values
     y_train = train_df[target_cols].values
-    X_test  = test_df[feature_cols].fillna(0).values
-    y_test  = test_df[target_cols].values
+    X_test = test_df[feature_cols].fillna(0).values
+    y_test = test_df[target_cols].values
 
     return X_train, y_train, X_test, y_test, feature_cols
 
@@ -97,14 +86,14 @@ def load_dataset(folder, prefix, target_cols, drop_cols):
 # Training & Evaluation
 # =========================
 
-def run_experiment(name, folder, prefix, targets, drop_cols):
+def run_experiment(name, folder, targets, drop_cols):
 
     print("\n" + "="*70)
     print(f"Dataset: {name}")
     print("="*70)
 
     X_train_full, y_train_full, X_test, y_test, features = load_dataset(
-        folder, prefix, targets, drop_cols
+        folder, targets, drop_cols
     )
 
     # Split into train/validation
@@ -260,7 +249,6 @@ def main():
     run_experiment(
         name="Savanna Preserve",
         folder="savanna_preserve",
-        prefix="1",
         targets=["temperature_2m"],
         drop_cols=["relative_humidity_2m"]
     )
@@ -268,11 +256,17 @@ def main():
     # Urban Air dataset skipped - only 168 samples with poor train/test split
 
     run_experiment(
-        name="Resilient Fields",
+        name="Resilient Fields - Irradiance",
         folder="resilient_fields",
-        prefix="3",
-        targets=["global_tilted_irradiance", "precipitation"],
-        drop_cols=[]
+        targets=["global_tilted_irradiance"],
+        drop_cols=["precipitation"]
+    )
+
+    run_experiment(
+        name="Resilient Fields - Precipitation",
+        folder="resilient_fields",
+        targets=["precipitation"],
+        drop_cols=["global_tilted_irradiance"]
     )
 
 if __name__ == "__main__":
