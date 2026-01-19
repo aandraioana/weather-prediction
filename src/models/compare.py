@@ -72,8 +72,9 @@ def load_data():
     y_train = train_data['temperature_2m'].values
     X_test = test_data[feature_columns].fillna(0).values
     y_test = test_data['temperature_2m'].values
+    test_dates = test_data['date'].values
 
-    return X_train, y_train, X_test, y_test
+    return X_train, y_train, X_test, y_test, test_dates
 
 
 def train_linear_regression(X_train, y_train, X_test):
@@ -123,9 +124,10 @@ def train_neural_network(X_train, y_train, X_test):
     return predictions * (y_max - y_min) + y_min
 
 
-def save_predictions_csv(y_test, lr_pred, nn_pred):
+def save_predictions_csv(y_test, lr_pred, nn_pred, dates):
     """Save predictions to CSV file."""
     results_df = pd.DataFrame({
+        'date': dates,
         'actual': y_test,
         'linear_regression_predicted': lr_pred,
         'neural_network_predicted': nn_pred,
@@ -134,6 +136,9 @@ def save_predictions_csv(y_test, lr_pred, nn_pred):
         'lr_abs_error': np.abs(y_test - lr_pred),
         'nn_abs_error': np.abs(y_test - nn_pred)
     })
+
+    # Sort by date
+    results_df = results_df.sort_values('date').reset_index(drop=True)
 
     csv_path = PROJECT_ROOT / 'predictions_comparison.csv'
     results_df.to_csv(csv_path, index=False)
@@ -242,7 +247,7 @@ def plot_comparison(y_test, lr_pred, nn_pred):
 
 def main():
     print("Loading data...")
-    X_train, y_train, X_test, y_test = load_data()
+    X_train, y_train, X_test, y_test, test_dates = load_data()
 
     print("Training Linear Regression...")
     lr_predictions = train_linear_regression(X_train, y_train, X_test)
@@ -251,7 +256,7 @@ def main():
     nn_predictions = train_neural_network(X_train, y_train, X_test)
 
     print("Saving predictions to CSV...")
-    save_predictions_csv(y_test, lr_predictions, nn_predictions)
+    save_predictions_csv(y_test, lr_predictions, nn_predictions, test_dates)
 
     print("Generating comparison plots...")
     plot_comparison(y_test, lr_predictions, nn_predictions)
