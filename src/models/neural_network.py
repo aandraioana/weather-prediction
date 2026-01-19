@@ -217,7 +217,7 @@ def run_experiment(name, folder, prefix, targets, drop_cols):
     # Evaluation on test set
     model.eval()
     with torch.no_grad():
-        preds = model(torch.FloatTensor(X_test_s)).numpy()
+        preds = model(torch.FloatTensor(X_test_s)).detach().cpu().numpy()
 
     preds_orig = scaler_y.inverse_transform(preds)
     y_test_orig = scaler_y.inverse_transform(y_test_s)
