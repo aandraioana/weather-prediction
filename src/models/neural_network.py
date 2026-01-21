@@ -7,10 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 from pathlib import Path
-
-# =========================
-# Config
-# =========================
+import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -20,9 +17,17 @@ torch.manual_seed(SEED)
 
 VAL_SPLIT = 0.2
 
-# Per-dataset configurations
 CONFIGS = {
     "savanna_temperature": {
+        "hidden_layers": [128, 64, 32],
+        "learning_rate": 0.001,
+        "epochs": 1000,
+        "batch_size": 32,
+        "dropout_rate": 0.1,
+        "patience": 50,
+        "use_log_target": False,
+    },
+    "urban_aqi": {
         "hidden_layers": [128, 64, 32],
         "learning_rate": 0.001,
         "epochs": 1000,
@@ -47,13 +52,10 @@ CONFIGS = {
         "batch_size": 32,
         "dropout_rate": 0.0,
         "patience": 150,
-        "use_log_target": False,  # Log transform didn't help
+        "use_log_target": False,
     },
 }
 
-# =========================
-# Model
-# =========================
 
 class WeatherPredictor(nn.Module):
     def __init__(self, input_size, hidden_layers, output_size, dropout_rate=0.0):
@@ -76,19 +78,18 @@ class WeatherPredictor(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 # =========================
 # Preprocessing
 # =========================
 
 def add_cyclical_encoding(df):
-    """Convert month/season to cyclical sin/cos features."""
     if "month" in df.columns:
         df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
         df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
         df.drop("month", axis=1, inplace=True)
 
     if "season" in df.columns:
-        # Map season to numeric first
         if df["season"].dtype == object:
             season_map = {"winter":1, "spring":2, "summer":3, "fall":4, "autumn":4}
             df["season"] = df["season"].str.lower().map(season_map)
@@ -100,31 +101,22 @@ def add_cyclical_encoding(df):
 
 
 def add_lag_differences(df, prefix):
-    """Add rate of change features from lag columns."""
-    # Find lag columns
     lag_cols = [c for c in df.columns if f"{prefix}_previous_day" in c]
     lag_cols = sorted(lag_cols, key=lambda x: int(x.split("day")[-1]))
 
     if len(lag_cols) >= 2:
-        # 1-day change
         df[f"{prefix}_change_1d"] = df[lag_cols[0]] - df[lag_cols[1]]
     if len(lag_cols) >= 7:
-        # 7-day change (trend)
         df[f"{prefix}_change_7d"] = df[lag_cols[0]] - df[lag_cols[6]]
-        # Rolling std (volatility)
         df[f"{prefix}_std_7d"] = df[lag_cols].std(axis=1)
 
     return df
 
 
-def preprocess_features(df, target_name=None):
-    """Apply NN-specific preprocessing."""
+def preprocess_features(df):
     df = df.copy()
-
-    # Cyclical encoding for time features
     df = add_cyclical_encoding(df)
 
-    # Add lag differences for each lag feature type
     for col in df.columns:
         if "_previous_day1" in col:
             prefix = col.replace("_previous_day1", "")
@@ -134,11 +126,10 @@ def preprocess_features(df, target_name=None):
 
 
 # =========================
-# Data Loader
+# Dataset
 # =========================
 
 def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
-
     base = PROJECT_ROOT / f"data/{folder}"
 
     train_df = pd.read_csv(base / "train.csv")
@@ -147,7 +138,6 @@ def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
     train_df["date"] = pd.to_datetime(train_df["date"])
     test_df["date"] = pd.to_datetime(test_df["date"])
 
-    # Apply NN-specific preprocessing
     train_df = preprocess_features(train_df)
     test_df = preprocess_features(test_df)
 
@@ -161,47 +151,80 @@ def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
     X_test = test_df[feature_cols].fillna(0).values
     y_test = test_df[target_cols].values
 
-    # Apply log transform to target if requested (for skewed data like precipitation)
     if use_log_target:
-        y_train = np.log1p(y_train)  # log(1 + x) to handle zeros
+        y_train = np.log1p(y_train)
         y_test = np.log1p(y_test)
 
     return X_train, y_train, X_test, y_test, feature_cols, use_log_target
 
+
 # =========================
-# Training & Evaluation
+# Plotting
+# =========================
+
+def plot_training_curves(train_losses, val_losses, name):
+    plt.figure(figsize=(8, 5))
+    plt.plot(train_losses, label="Train")
+    plt.plot(val_losses, label="Validation")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE")
+    plt.title(f"Training Curves – {name}")
+    plt.legend()
+    plt.grid(alpha=0.3)
+
+    out = PROJECT_ROOT / f"training_curve_{name.replace(' ', '_')}.png"
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+def plot_predictions(y_true, y_pred, name):
+    plt.figure(figsize=(6, 6))
+    plt.scatter(y_true, y_pred, alpha=0.6)
+    mn, mx = min(y_true.min(), y_pred.min()), max(y_true.max(), y_pred.max())
+    plt.plot([mn, mx], [mn, mx], "k--")
+    plt.xlabel("Actual")
+    plt.ylabel("Predicted")
+    plt.title(f"Predicted vs Actual – {name}")
+    plt.grid(alpha=0.3)
+
+    out = PROJECT_ROOT / f"pred_vs_actual_{name.replace(' ', '_')}.png"
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+def plot_error_hist(y_true, y_pred, name):
+    errors = y_true - y_pred
+    plt.figure(figsize=(7, 4))
+    plt.hist(errors, bins=40, alpha=0.75)
+    plt.axvline(0, color="black", linestyle="--")
+    plt.xlabel("Error")
+    plt.ylabel("Frequency")
+    plt.title(f"Error Distribution – {name}")
+    plt.grid(alpha=0.3)
+
+    out = PROJECT_ROOT / f"error_hist_{name.replace(' ', '_')}.png"
+    plt.savefig(out, dpi=150)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+# =========================
+# Training
 # =========================
 
 def run_experiment(name, folder, targets, drop_cols, config_name):
-
     cfg = CONFIGS[config_name]
-
-    print("\n" + "="*70)
-    print(f"Dataset: {name}")
-    print("="*70)
-    print(f"Config: {config_name}")
-    print(f"  Hidden layers: {cfg['hidden_layers']}")
-    print(f"  Learning rate: {cfg['learning_rate']}")
-    print(f"  Batch size: {cfg['batch_size']}")
-    print(f"  Dropout: {cfg['dropout_rate']}")
-    print(f"  Log target: {cfg['use_log_target']}")
 
     X_train_full, y_train_full, X_test, y_test, features, use_log = load_dataset(
         folder, targets, drop_cols, use_log_target=cfg['use_log_target']
     )
 
-    # Split into train/validation
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_full, y_train_full, test_size=VAL_SPLIT, random_state=SEED
     )
 
-    print(f"Train samples: {len(X_train)}")
-    print(f"Val samples  : {len(X_val)}")
-    print(f"Test samples : {len(X_test)}")
-    print(f"Features     : {len(features)}")
-    print(f"Targets      : {targets}")
-
-    # Scale features and targets
     scaler_X = StandardScaler()
     X_train_s = scaler_X.fit_transform(X_train)
     X_val_s = scaler_X.transform(X_val)
@@ -212,164 +235,119 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
     y_val_s = scaler_y.transform(y_val)
     y_test_s = scaler_y.transform(y_test)
 
-    # Create data loaders
-    train_ds = TensorDataset(
-        torch.FloatTensor(X_train_s),
-        torch.FloatTensor(y_train_s)
-    )
-    val_ds = TensorDataset(
-        torch.FloatTensor(X_val_s),
-        torch.FloatTensor(y_val_s)
+    train_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_train_s), torch.FloatTensor(y_train_s)),
+        batch_size=cfg['batch_size'], shuffle=True
     )
 
-    train_loader = DataLoader(train_ds, batch_size=cfg['batch_size'], shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=cfg['batch_size'], shuffle=False)
-
-    # Initialize model
-    model = WeatherPredictor(
-        input_size=X_train_s.shape[1],
-        hidden_layers=cfg['hidden_layers'],
-        output_size=y_train.shape[1],
-        dropout_rate=cfg['dropout_rate']
+    val_loader = DataLoader(
+        TensorDataset(torch.FloatTensor(X_val_s), torch.FloatTensor(y_val_s)),
+        batch_size=cfg['batch_size']
     )
 
-    print(model)
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    model = WeatherPredictor(X_train_s.shape[1], cfg['hidden_layers'], y_train.shape[1], cfg['dropout_rate'])
 
-    criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=20, verbose=False
-    )
+    criterion = nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20)
 
-    print("\nTraining...")
+    train_losses, val_losses = [], []
 
-    best_val_loss = float('inf')
+    best_loss = float("inf")
     patience_counter = 0
-    best_model_state = None
+    best_state = None
 
     for epoch in range(cfg['epochs']):
-        # Training phase
         model.train()
-        train_loss = 0
+        t_loss = 0
+
         for xb, yb in train_loader:
             optimizer.zero_grad()
-            preds = model(xb)
-            loss = criterion(preds, yb)
+            loss = criterion(model(xb), yb)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            train_loss += loss.item()
+            t_loss += loss.item()
 
-        # Validation phase
         model.eval()
-        val_loss = 0
+        v_loss = 0
         with torch.no_grad():
             for xb, yb in val_loader:
-                preds = model(xb)
-                loss = criterion(preds, yb)
-                val_loss += loss.item()
+                v_loss += criterion(model(xb), yb).item()
 
-        avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
+        t_loss /= len(train_loader)
+        v_loss /= len(val_loader)
 
-        # Learning rate scheduling
-        scheduler.step(avg_val_loss)
+        train_losses.append(t_loss)
+        val_losses.append(v_loss)
 
-        # Early stopping check
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        scheduler.step(v_loss)
+
+        if v_loss < best_loss:
+            best_loss = v_loss
+            best_state = model.state_dict()
             patience_counter = 0
-            best_model_state = model.state_dict().copy()
         else:
             patience_counter += 1
 
-        if (epoch+1) % 100 == 0:
-            lr = optimizer.param_groups[0]['lr']
-            print(f"Epoch {epoch+1}/{cfg['epochs']} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {lr:.6f}")
-
         if patience_counter >= cfg['patience']:
-            print(f"Early stopping at epoch {epoch+1}")
             break
 
-    # Restore best model
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    print(f"Best validation loss: {best_val_loss:.4f}")
+    model.load_state_dict(best_state)
 
-    # Evaluation on test set
-    model.eval()
     with torch.no_grad():
-        preds = model(torch.FloatTensor(X_test_s)).detach().cpu().tolist()
-        preds = np.array(preds)
+        preds = model(torch.FloatTensor(X_test_s)).numpy()
 
     preds_orig = scaler_y.inverse_transform(preds)
     y_test_orig = scaler_y.inverse_transform(y_test_s)
 
-    # Inverse log transform if used
     if use_log:
-        preds_orig = np.expm1(preds_orig)  # exp(x) - 1, inverse of log1p
+        preds_orig = np.expm1(preds_orig)
         y_test_orig = np.expm1(y_test_orig)
 
     mse = mean_squared_error(y_test_orig, preds_orig)
     r2 = r2_score(y_test_orig, preds_orig)
 
-    print("\nResults:")
-    print(f"MSE: {mse:.2f}")
-    print(f"R² : {r2:.4f}")
+    print(f"\n{name} → MSE: {mse:.2f} | R²: {r2:.4f}")
 
-    # Per-target metrics with appropriate thresholds
-    for i, t in enumerate(targets):
-        y_true = y_test_orig[:, i]
-        y_pred = preds_orig[:, i]
-        target_range = y_true.max() - y_true.min()
-        target_std = y_true.std()
+    plot_training_curves(train_losses, val_losses, name)
+    plot_predictions(y_test_orig[:, 0], preds_orig[:, 0], name)
+    plot_error_hist(y_test_orig[:, 0], preds_orig[:, 0], name)
 
-        # Use percentage of range for accuracy thresholds
-        thresh_5pct = target_range * 0.05
-        thresh_10pct = target_range * 0.10
-
-        acc_5 = np.mean(np.abs(y_true - y_pred) <= thresh_5pct) * 100
-        acc_10 = np.mean(np.abs(y_true - y_pred) <= thresh_10pct) * 100
-
-        target_r2 = r2_score(y_true, y_pred)
-        target_mse = mean_squared_error(y_true, y_pred)
-
-        print(f"\n{t}:")
-        print(f"  R²: {target_r2:.4f} | MSE: {target_mse:.2f}")
-        print(f"  Accuracy ±5%: {acc_5:.1f}% | ±10%: {acc_10:.1f}%")
-
-# =========================
-# Main
-# =========================
 
 def main():
-
     run_experiment(
-        name="Savanna Preserve - Temperature",
-        folder="savanna_preserve",
-        targets=["temperature_2m"],
-        drop_cols=["relative_humidity_2m"],
-        config_name="savanna_temperature"
-    )
-
-    # Urban Air dataset skipped - only 168 samples with poor train/test split
-
-    run_experiment(
-        name="Resilient Fields - Irradiance",
-        folder="resilient_fields",
-        targets=["global_tilted_irradiance"],
-        drop_cols=["precipitation"],
-        config_name="resilient_irradiance"
+        "Savanna Preserve - Temperature",
+        "savanna_preserve",
+        ["temperature_2m"],
+        ["relative_humidity_2m"],
+        "savanna_temperature"
     )
 
     run_experiment(
-        name="Resilient Fields - Precipitation",
-        folder="resilient_fields",
-        targets=["precipitation"],
-        drop_cols=["global_tilted_irradiance"],
-        config_name="resilient_precipitation"
+        "Clean Urban Air - AQI",
+        "clean_urban_air",
+        ["us_aqi"],
+        ["relative_humidity_2m"],
+        "urban_aqi"
     )
+
+    run_experiment(
+        "Resilient Fields - Irradiance",
+        "resilient_fields",
+        ["global_tilted_irradiance"],
+        ["precipitation"],
+        "resilient_irradiance"
+    )
+
+    run_experiment(
+        "Resilient Fields - Precipitation",
+        "resilient_fields",
+        ["precipitation"],
+        ["global_tilted_irradiance"],
+        "resilient_precipitation"
+    )
+
 
 if __name__ == "__main__":
     main()
