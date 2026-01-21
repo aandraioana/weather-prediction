@@ -1,7 +1,7 @@
 import pandas as pd
-import numpy as np
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
@@ -10,10 +10,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
-
-SEED = 42
-np.random.seed(SEED)
-torch.manual_seed(SEED)
 
 VAL_SPLIT = 0.2
 
@@ -251,7 +247,7 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
     )
 
     X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full, y_train_full, test_size=VAL_SPLIT, random_state=SEED
+        X_train_full, y_train_full, test_size=VAL_SPLIT
     )
 
     scaler_X = StandardScaler()
@@ -265,12 +261,18 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
     y_test_s = scaler_y.transform(y_test)
 
     train_loader = DataLoader(
-        TensorDataset(torch.FloatTensor(X_train_s), torch.FloatTensor(y_train_s)),
+        TensorDataset(
+            torch.tensor(X_train_s.tolist(), dtype=torch.float32),
+            torch.tensor(y_train_s.tolist(), dtype=torch.float32)
+        ),
         batch_size=cfg['batch_size'], shuffle=True
     )
 
     val_loader = DataLoader(
-        TensorDataset(torch.FloatTensor(X_val_s), torch.FloatTensor(y_val_s)),
+        TensorDataset(
+            torch.tensor(X_val_s.tolist(), dtype=torch.float32),
+            torch.tensor(y_val_s.tolist(), dtype=torch.float32)
+        ),
         batch_size=cfg['batch_size']
     )
 
@@ -325,7 +327,7 @@ def run_experiment(name, folder, targets, drop_cols, config_name):
     model.load_state_dict(best_state)
 
     with torch.no_grad():
-        preds = model(torch.FloatTensor(X_test_s)).numpy()
+        preds = model(torch.tensor(X_test_s.tolist(), dtype=torch.float32)).tolist()
 
     preds_orig = scaler_y.inverse_transform(preds)
     y_test_orig = scaler_y.inverse_transform(y_test_s)
