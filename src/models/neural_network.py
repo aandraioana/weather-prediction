@@ -83,6 +83,29 @@ class WeatherPredictor(nn.Module):
 # Preprocessing
 # =========================
 
+def extract_time_features(df):
+    """Extract hour and day of week from date column with cyclical encoding."""
+    if "date" not in df.columns:
+        return df
+
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Extract hour (0-23) - important for rush hour patterns
+    hour = df["date"].dt.hour
+    df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+
+    # Extract day of week (0=Monday, 6=Sunday) - weekday vs weekend
+    dow = df["date"].dt.dayofweek
+    df["dow_sin"] = np.sin(2 * np.pi * dow / 7)
+    df["dow_cos"] = np.cos(2 * np.pi * dow / 7)
+
+    # Binary weekend flag
+    df["is_weekend"] = (dow >= 5).astype(int)
+
+    return df
+
+
 def add_cyclical_encoding(df):
     if "month" in df.columns:
         df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
@@ -115,8 +138,14 @@ def add_lag_differences(df, prefix):
 
 def preprocess_features(df):
     df = df.copy()
+
+    # Extract time features (hour, day of week) from date
+    df = extract_time_features(df)
+
+    # Cyclical encoding for month/season
     df = add_cyclical_encoding(df)
 
+    # Add lag differences
     for col in df.columns:
         if "_previous_day1" in col:
             prefix = col.replace("_previous_day1", "")
