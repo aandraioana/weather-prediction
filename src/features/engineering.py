@@ -13,7 +13,6 @@ def get_season(date):
         (date.month in [1, 2]) or
         (date.month == 3 and date.day < 21)):
         return 'winter'
-    # You can add other seasons similarly:
     elif (date.month == 3 and date.day >= 21) or (date.month == 4) or (date.month == 5) or (date.month == 6 and date.day < 21):
         return 'spring'
     elif (date.month == 6 and date.day >= 21) or (date.month in [7, 8]) or (date.month == 9 and date.day < 23):
@@ -24,43 +23,82 @@ def get_season(date):
         return 'unknown'
 
 
-pd.set_option('display.max_columns', None)  # Don't truncate column content
-pd.set_option('display.width', 0)
+def process_dataset(folder, name, target_cols, has_temp=False, has_precip=False):
+    """Process a dataset and add engineered features."""
+    print(f"\n{'='*60}")
+    print(f"Processing: {name}")
+    print('='*60)
 
-savannah = pd.read_csv(PROJECT_ROOT / "data/savanna_preserve/1_X_train.csv")
-savannah['date'] = pd.to_datetime(savannah['date'])
-savannah['month'] = savannah['date'].dt.month
-savannah['season'] = savannah['date'].apply(get_season)
-savannah['average_humidity'] = savannah[
-    [f'relative_humidity_2m_previous_day{i}' for i in range(1, 8)]
-].mean(axis=1).round(2)
-savannah['average_temp'] = savannah[
-    [f'temperature_2m_previous_day{i}' for i in range(1, 8)]
-].mean(axis=1).round(2)
+    for split in ['train', 'test']:
+        filepath = PROJECT_ROOT / f"data/{folder}/{split}.csv"
+        df = pd.read_csv(filepath)
 
-print(savannah.head())
-savannah.to_csv(PROJECT_ROOT / "data/savanna_preserve/1_X_train.csv", index=False)
+        # Parse date
+        df['date'] = pd.to_datetime(df['date'])
 
-urban = pd.read_csv(PROJECT_ROOT / "data/clean_urban_air/2_X_test.csv")
-urban['date'] = pd.to_datetime(urban['date'])
-urban['month'] = urban['date'].dt.month
-urban['weekday'] = urban['date'].dt.weekday
-urban['hour'] = urban['date'].dt.hour
-urban['average_humidity'] = urban[
-    [f'relative_humidity_2m_previous_day{i}' for i in range(1, 8)]
-].mean(axis=1).round(2)
-urban.to_csv(PROJECT_ROOT / "data/clean_urban_air/2_X_train.csv", index=False)
-print(urban.head())
+        # Add time features
+        if 'month' not in df.columns:
+            df['month'] = df['date'].dt.month
+        if 'season' not in df.columns:
+            df['season'] = df['date'].apply(get_season)
 
-field = pd.read_csv(PROJECT_ROOT / "data/resilient_fields/3_X_train.csv")
-field['date'] = pd.to_datetime(field['date'])
-field['month'] = field['date'].dt.month
-field['season'] = field['date'].apply(get_season)
-field['average_precipitation'] = field[
-    [f'precipitation_previous_day{i}' for i in range(1, 8)]
-].mean(axis=1).round(2)
-field.to_csv(PROJECT_ROOT / "data/resilient_fields/3_X_train.csv", index=False)
-print(field.head())
+        # Add average humidity if humidity columns exist
+        humidity_cols = [f'relative_humidity_2m_previous_day{i}' for i in range(1, 8)]
+        if all(col in df.columns for col in humidity_cols):
+            if 'average_humidity' not in df.columns:
+                df['average_humidity'] = df[humidity_cols].mean(axis=1).round(2)
 
-#visualize the data
-print(tabulate(savannah.head(), headers='keys', tablefmt='psql'))
+        # Add average temperature if temperature columns exist
+        temp_cols = [f'temperature_2m_previous_day{i}' for i in range(1, 8)]
+        if all(col in df.columns for col in temp_cols):
+            if 'average_temp' not in df.columns:
+                df['average_temp'] = df[temp_cols].mean(axis=1).round(2)
+
+        # Add average precipitation if precipitation columns exist
+        precip_cols = [f'precipitation_previous_day{i}' for i in range(1, 8)]
+        if all(col in df.columns for col in precip_cols):
+            if 'average_precipitation' not in df.columns:
+                df['average_precipitation'] = df[precip_cols].mean(axis=1).round(2)
+
+        # Save back
+        df.to_csv(filepath, index=False)
+        print(f"  {split}.csv: {len(df)} rows, {len(df.columns)} columns")
+
+    # Show sample
+    train_df = pd.read_csv(PROJECT_ROOT / f"data/{folder}/train.csv")
+    print(f"\nSample from {name}:")
+    print(tabulate(train_df.head(3), headers='keys', tablefmt='psql', showindex=False))
+
+
+def main():
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 0)
+
+    # Process Savanna Preserve
+    process_dataset(
+        folder='savanna_preserve',
+        name='Savanna Preserve',
+        target_cols=['temperature_2m'],
+        has_temp=True
+    )
+
+    # Process Clean Urban Air
+    process_dataset(
+        folder='clean_urban_air',
+        name='Clean Urban Air',
+        target_cols=['us_aqi']
+    )
+
+    # Process Resilient Fields
+    process_dataset(
+        folder='resilient_fields',
+        name='Resilient Fields',
+        target_cols=['global_tilted_irradiance', 'precipitation'],
+        has_precip=True
+    )
+
+    print("\nFeature engineering complete!")
+
+
+if __name__ == "__main__":
+    main()

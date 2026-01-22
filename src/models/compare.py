@@ -1,350 +1,254 @@
+"""
+Compare Linear Regression vs Neural Network (MLP) for weather prediction.
+Uses sklearn for both models - lightweight, no PyTorch needed.
+"""
+
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.linear_model import LinearRegression
+from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, r2_score
-import matplotlib.pyplot as plt
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from pathlib import Path
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Random seed for reproducibility
-SEED = 42
-np.random.seed(SEED)
-torch.manual_seed(SEED)
 
-# Neural network hyperparameters
-HIDDEN_LAYERS = [256, 128, 64]
-LEARNING_RATE = 0.001
-EPOCHS = 800
-BATCH_SIZE = 32
-DROPOUT_RATE = 0.0
+def load_data(folder, target_col, drop_cols):
+    """Load train and test data."""
+    base = PROJECT_ROOT / f"data/{folder}"
 
+    train_df = pd.read_csv(base / "train.csv")
+    test_df = pd.read_csv(base / "test.csv")
 
-class WeatherPredictor(nn.Module):
-    def __init__(self, input_size, hidden_layers, dropout_rate=0.0):
-        super(WeatherPredictor, self).__init__()
-        layers = []
-        prev_size = input_size
-        for hidden_size in hidden_layers:
-            layers.append(nn.Linear(prev_size, hidden_size))
-            layers.append(nn.BatchNorm1d(hidden_size))
-            layers.append(nn.ReLU())
-            prev_size = hidden_size
-        layers.append(nn.Linear(prev_size, 1))
-        self.network = nn.Sequential(*layers)
+    # Handle season encoding
+    if "season" in train_df.columns:
+        season_map = {"winter": 1, "spring": 2, "summer": 3, "fall": 4, "autumn": 4}
+        train_df["season"] = train_df["season"].str.lower().map(season_map)
+        test_df["season"] = test_df["season"].str.lower().map(season_map)
 
-    def forward(self, x):
-        return self.network(x)
+    # Get feature columns
+    feature_cols = [
+        c for c in train_df.columns
+        if c not in ["date", "location_id", target_col] + drop_cols
+    ]
 
+    X_train = train_df[feature_cols].fillna(0).values
+    y_train = train_df[target_col].values
+    X_test = test_df[feature_cols].fillna(0).values
+    y_test = test_df[target_col].values
+    dates = test_df["date"].values if "date" in test_df.columns else None
 
-def add_nonlinear_features(df):
-    """Add complex non-linear features that favor neural networks."""
-    temp_cols = [col for col in df.columns if 'temperature_2m_previous' in col]
-    humidity_cols = [col for col in df.columns if 'relative_humidity_2m_previous' in col]
-
-    # Temperature differences (trends)
-    for i in range(1, 7):
-        col1 = f'temperature_2m_previous_day{i}'
-        col2 = f'temperature_2m_previous_day{i+1}'
-        if col1 in df.columns and col2 in df.columns:
-            df[f'temp_diff_{i}_{i+1}'] = df[col1] - df[col2]
-
-    # Second-order differences (acceleration)
-    for i in range(1, 6):
-        diff1 = f'temp_diff_{i}_{i+1}'
-        diff2 = f'temp_diff_{i+1}_{i+2}'
-        if diff1 in df.columns and diff2 in df.columns:
-            df[f'temp_accel_{i}'] = df[diff1] - df[diff2]
-
-    # Statistics
-    if temp_cols:
-        df['temp_variance'] = df[temp_cols].var(axis=1)
-        df['temp_range'] = df[temp_cols].max(axis=1) - df[temp_cols].min(axis=1)
-        df['temp_skew'] = df[temp_cols].skew(axis=1)
-        df['temp_mean'] = df[temp_cols].mean(axis=1)
-        df['temp_std'] = df[temp_cols].std(axis=1)
-
-    if humidity_cols:
-        df['humidity_variance'] = df[humidity_cols].var(axis=1)
-        df['humidity_range'] = df[humidity_cols].max(axis=1) - df[humidity_cols].min(axis=1)
-        df['humidity_mean'] = df[humidity_cols].mean(axis=1)
-
-    # Cross interactions for all days
-    for i in range(1, 8):
-        temp_col = f'temperature_2m_previous_day{i}'
-        hum_col = f'relative_humidity_2m_previous_day{i}'
-        if temp_col in df.columns and hum_col in df.columns:
-            df[f'temp_hum_interact_{i}'] = df[temp_col] * df[hum_col] / 100
-            df[f'temp_hum_ratio_{i}'] = df[temp_col] / (df[hum_col] + 1)
-
-    # Polynomial features for multiple days
-    for i in range(1, 4):
-        temp_col = f'temperature_2m_previous_day{i}'
-        if temp_col in df.columns:
-            df[f'temp{i}_squared'] = df[temp_col] ** 2
-            df[f'temp{i}_sqrt'] = np.sqrt(np.abs(df[temp_col])) * np.sign(df[temp_col])
-
-    # Cross-day interactions
-    if 'temperature_2m_previous_day1' in df.columns and 'temperature_2m_previous_day2' in df.columns:
-        df['temp_1_2_product'] = df['temperature_2m_previous_day1'] * df['temperature_2m_previous_day2']
-    if 'temperature_2m_previous_day1' in df.columns and 'temperature_2m_previous_day3' in df.columns:
-        df['temp_1_3_product'] = df['temperature_2m_previous_day1'] * df['temperature_2m_previous_day3']
-
-    # Cyclical time encoding
-    if 'date' in df.columns:
-        dt = pd.to_datetime(df['date'])
-        df['hour'] = dt.dt.hour
-        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-        df['day_of_year'] = dt.dt.dayofyear
-        df['day_sin'] = np.sin(2 * np.pi * df['day_of_year'] / 365)
-        df['day_cos'] = np.cos(2 * np.pi * df['day_of_year'] / 365)
-        # More cyclical
-        df['hour_sin2'] = np.sin(4 * np.pi * df['hour'] / 24)
-        df['hour_cos2'] = np.cos(4 * np.pi * df['hour'] / 24)
-
-    # Combined features
-    if 'temp_mean' in df.columns and 'hour_sin' in df.columns:
-        df['temp_hour_interact'] = df['temp_mean'] * df['hour_sin']
-
-    return df
-
-
-def load_data():
-    """Load and prepare the dataset with non-linear features."""
-    train_features = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_X_train.csv')
-    train_labels = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_y_train.csv')
-    test_features = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_X_test.csv')
-    test_labels = pd.read_csv(PROJECT_ROOT / 'data/savanna_preserve/1_y_test.csv')
-
-    train_features['date'] = pd.to_datetime(train_features['date'])
-    train_labels['date'] = pd.to_datetime(train_labels['date'])
-    test_features['date'] = pd.to_datetime(test_features['date'])
-    test_labels['date'] = pd.to_datetime(test_labels['date'])
-
-    train_data = pd.merge(train_features, train_labels, on=['date', 'location_id'], how='inner')
-    test_data = pd.merge(test_features, test_labels, on=['date', 'location_id'], how='inner')
-
-    train_data.drop('Unnamed: 0_x', axis=1, inplace=True, errors='ignore')
-    test_data.drop('Unnamed: 0_x', axis=1, inplace=True, errors='ignore')
-
-    # Add non-linear features
-    train_data = add_nonlinear_features(train_data)
-    test_data = add_nonlinear_features(test_data)
-
-    # Remove ALL raw features - only keep derived non-linear features
-    raw_temp_cols = [f'temperature_2m_previous_day{i}' for i in range(1, 8)]
-    raw_hum_cols = [f'relative_humidity_2m_previous_day{i}' for i in range(1, 8)]
-    drop_cols = ['season', 'month', 'average_humidity', 'average_temp', 'hour', 'day_of_year',
-                 'temp_mean', 'humidity_mean'] + raw_temp_cols + raw_hum_cols
-    for col in drop_cols:
-        if col in train_data.columns:
-            train_data.drop(col, axis=1, inplace=True)
-        if col in test_data.columns:
-            test_data.drop(col, axis=1, inplace=True)
-
-    feature_columns = [col for col in train_data.columns
-                      if col not in ['Unnamed: 0', 'Unnamed: 0_y', 'date', 'location_id',
-                                    'temperature_2m', 'relative_humidity_2m']]
-
-    X_train = train_data[feature_columns].fillna(0).values
-    y_train = train_data['temperature_2m'].values
-    X_test = test_data[feature_columns].fillna(0).values
-    y_test = test_data['temperature_2m'].values
-    test_dates = test_data['date'].values
-
-    print(f"Features used ({len(feature_columns)}): {feature_columns[:10]}...")
-
-    return X_train, y_train, X_test, y_test, test_dates
+    return X_train, y_train, X_test, y_test, dates, feature_cols
 
 
 def train_linear_regression(X_train, y_train, X_test):
-    """Train linear regression model."""
+    """Train linear regression and return predictions."""
     model = LinearRegression()
     model.fit(X_train, y_train)
     return model.predict(X_test)
 
 
 def train_neural_network(X_train, y_train, X_test):
-    """Train neural network model."""
-    # Scale features
+    """Train MLP neural network and return predictions."""
     scaler_X = StandardScaler()
-    X_train_scaled = scaler_X.fit_transform(X_train)
-    X_test_scaled = scaler_X.transform(X_test)
+    X_train_s = scaler_X.fit_transform(X_train)
+    X_test_s = scaler_X.transform(X_test)
 
-    # Scale target
-    scaler_y = StandardScaler()
-    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+    model = MLPRegressor(
+        hidden_layer_sizes=(64, 32),
+        learning_rate_init=0.001,
+        max_iter=500,
+        early_stopping=True,
+        validation_fraction=0.2,
+        random_state=42,
+        verbose=False
+    )
 
-    # Create data loader
-    train_dataset = TensorDataset(torch.FloatTensor(X_train_scaled), torch.FloatTensor(y_train_scaled))
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-
-    # Model setup
-    model = WeatherPredictor(X_train_scaled.shape[1], HIDDEN_LAYERS, DROPOUT_RATE)
-    criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.5)
-
-    # Training
-    model.train()
-    for epoch in range(EPOCHS):
-        for X_batch, y_batch in train_loader:
-            optimizer.zero_grad()
-            predictions = model(X_batch).squeeze()
-            loss = criterion(predictions, y_batch)
-            loss.backward()
-            optimizer.step()
-        scheduler.step()
-
-    # Predict
-    model.eval()
-    with torch.no_grad():
-        predictions = model(torch.FloatTensor(X_test_scaled)).squeeze().numpy()
-
-    return scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+    model.fit(X_train_s, y_train)
+    return model.predict(X_test_s)
 
 
-def save_predictions_csv(y_test, lr_pred, nn_pred, dates):
-    """Save predictions to CSV file."""
-    results_df = pd.DataFrame({
-        'date': dates,
-        'actual': y_test,
-        'linear_regression_predicted': lr_pred,
-        'neural_network_predicted': nn_pred,
-        'lr_error': y_test - lr_pred,
-        'nn_error': y_test - nn_pred,
-        'lr_abs_error': np.abs(y_test - lr_pred),
-        'nn_abs_error': np.abs(y_test - nn_pred)
-    })
+def evaluate_model(y_true, y_pred, name):
+    """Calculate evaluation metrics."""
+    mse = mean_squared_error(y_true, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_true, y_pred)
+    r2 = r2_score(y_true, y_pred)
 
-    # Sort by date
-    results_df = results_df.sort_values('date').reset_index(drop=True)
+    target_range = y_true.max() - y_true.min()
+    thresh_5 = target_range * 0.05
+    thresh_10 = target_range * 0.10
+    acc_5 = np.mean(np.abs(y_true - y_pred) <= thresh_5) * 100
+    acc_10 = np.mean(np.abs(y_true - y_pred) <= thresh_10) * 100
 
-    csv_path = PROJECT_ROOT / 'predictions_comparison.csv'
-    results_df.to_csv(csv_path, index=False)
-    print(f"Predictions saved to: {csv_path}")
-    return results_df
+    return {
+        "name": name,
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "r2": r2,
+        "acc_5pct": acc_5,
+        "acc_10pct": acc_10
+    }
 
 
-def plot_comparison(y_test, lr_pred, nn_pred):
-    """Create comparison plots."""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+def print_comparison(lr_metrics, nn_metrics, target_name):
+    """Print comparison table."""
+    print(f"\n{'='*60}")
+    print(f"COMPARISON: {target_name}")
+    print('='*60)
 
-    # Calculate metrics
-    lr_mse = mean_squared_error(y_test, lr_pred)
-    lr_r2 = r2_score(y_test, lr_pred)
-    nn_mse = mean_squared_error(y_test, nn_pred)
-    nn_r2 = r2_score(y_test, nn_pred)
-
-    # Plot 1: Actual vs Predicted scatter plots
-    ax1 = axes[0, 0]
-    ax1.scatter(y_test, lr_pred, alpha=0.6, label=f'Linear Regression (R²={lr_r2:.2f})', color='blue')
-    ax1.scatter(y_test, nn_pred, alpha=0.6, label=f'Neural Network (R²={nn_r2:.2f})', color='red')
-    min_val = min(y_test.min(), lr_pred.min(), nn_pred.min())
-    max_val = max(y_test.max(), lr_pred.max(), nn_pred.max())
-    ax1.plot([min_val, max_val], [min_val, max_val], 'k--', label='Perfect Prediction')
-    ax1.set_xlabel('Actual Temperature (°C)')
-    ax1.set_ylabel('Predicted Temperature (°C)')
-    ax1.set_title('Actual vs Predicted Temperature')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-
-    # Plot 2: Prediction errors distribution
-    ax2 = axes[0, 1]
-    lr_errors = y_test - lr_pred
-    nn_errors = y_test - nn_pred
-    ax2.hist(lr_errors, bins=30, alpha=0.6, label=f'Linear Regression (MSE={lr_mse:.2f})', color='blue')
-    ax2.hist(nn_errors, bins=30, alpha=0.6, label=f'Neural Network (MSE={nn_mse:.2f})', color='red')
-    ax2.axvline(x=0, color='black', linestyle='--')
-    ax2.set_xlabel('Prediction Error (°C)')
-    ax2.set_ylabel('Frequency')
-    ax2.set_title('Distribution of Prediction Errors')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-
-    # Plot 3: Time series comparison
-    ax3 = axes[1, 0]
-    x_range = range(len(y_test))
-    ax3.plot(x_range, y_test, 'k-', label='Actual', linewidth=2)
-    ax3.plot(x_range, lr_pred, 'b--', label='Linear Regression', alpha=0.7)
-    ax3.plot(x_range, nn_pred, 'r--', label='Neural Network', alpha=0.7)
-    ax3.set_xlabel('Sample Index')
-    ax3.set_ylabel('Temperature (°C)')
-    ax3.set_title('Temperature Predictions Over Test Set')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-
-    # Plot 4: Metrics comparison bar chart
-    ax4 = axes[1, 1]
-    metrics = ['MSE', 'R² Score', 'Within 1°C (%)', 'Within 2°C (%)']
-    lr_within_1 = np.mean(np.abs(y_test - lr_pred) <= 1) * 100
-    lr_within_2 = np.mean(np.abs(y_test - lr_pred) <= 2) * 100
-    nn_within_1 = np.mean(np.abs(y_test - nn_pred) <= 1) * 100
-    nn_within_2 = np.mean(np.abs(y_test - nn_pred) <= 2) * 100
-
-    lr_values = [lr_mse, lr_r2 * 100, lr_within_1, lr_within_2]
-    nn_values = [nn_mse, nn_r2 * 100, nn_within_1, nn_within_2]
-
-    x = np.arange(len(metrics))
-    width = 0.35
-    bars1 = ax4.bar(x - width/2, lr_values, width, label='Linear Regression', color='blue', alpha=0.7)
-    bars2 = ax4.bar(x + width/2, nn_values, width, label='Neural Network', color='red', alpha=0.7)
-    ax4.set_ylabel('Value')
-    ax4.set_title('Model Performance Comparison')
-    ax4.set_xticks(x)
-    ax4.set_xticklabels(metrics)
-    ax4.legend()
-    ax4.grid(True, alpha=0.3, axis='y')
-
-    # Add value labels on bars
-    for bar in bars1:
-        height = bar.get_height()
-        ax4.annotate(f'{height:.1f}', xy=(bar.get_x() + bar.get_width()/2, height),
-                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
-    for bar in bars2:
-        height = bar.get_height()
-        ax4.annotate(f'{height:.1f}', xy=(bar.get_x() + bar.get_width()/2, height),
-                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(PROJECT_ROOT / 'model_comparison.png', dpi=150)
-    plt.show(block=False)
-    plt.pause(2)
-    plt.close()
-
-    # Print summary
-    print("\n" + "=" * 60)
-    print("MODEL COMPARISON SUMMARY")
-    print("=" * 60)
-    print(f"\n{'Metric':<20} {'Linear Regression':>20} {'Neural Network':>20}")
+    print(f"\n{'Metric':<20} {'Linear Reg':>15} {'Neural Net':>15} {'Better':>10}")
     print("-" * 60)
-    print(f"{'MSE':<20} {lr_mse:>20.2f} {nn_mse:>20.2f}")
-    print(f"{'R² Score':<20} {lr_r2:>20.2f} {nn_r2:>20.2f}")
-    print(f"{'Within 1°C':<20} {lr_within_1:>19.1f}% {nn_within_1:>19.1f}%")
-    print(f"{'Within 2°C':<20} {lr_within_2:>19.1f}% {nn_within_2:>19.1f}%")
-    print("\nComparison graph saved to: model_comparison.png")
+
+    metrics = [
+        ("MSE", "mse", False),
+        ("RMSE", "rmse", False),
+        ("MAE", "mae", False),
+        ("R²", "r2", True),
+        ("Accuracy ±5%", "acc_5pct", True),
+        ("Accuracy ±10%", "acc_10pct", True),
+    ]
+
+    for display_name, key, higher_better in metrics:
+        lr_val = lr_metrics[key]
+        nn_val = nn_metrics[key]
+
+        if higher_better:
+            better = "NN" if nn_val > lr_val else "LR"
+        else:
+            better = "NN" if nn_val < lr_val else "LR"
+
+        if key in ["r2"]:
+            print(f"{display_name:<20} {lr_val:>15.4f} {nn_val:>15.4f} {better:>10}")
+        elif key in ["acc_5pct", "acc_10pct"]:
+            print(f"{display_name:<20} {lr_val:>14.1f}% {nn_val:>14.1f}% {better:>10}")
+        else:
+            print(f"{display_name:<20} {lr_val:>15.2f} {nn_val:>15.2f} {better:>10}")
+
+
+def plot_comparison(y_test, lr_pred, nn_pred, target_name):
+    """Create comparison plots."""
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+
+    # Scatter: LR
+    axes[0].scatter(y_test, lr_pred, alpha=0.6, s=20)
+    mn, mx = min(y_test.min(), lr_pred.min()), max(y_test.max(), lr_pred.max())
+    axes[0].plot([mn, mx], [mn, mx], 'k--')
+    axes[0].set_xlabel("Actual")
+    axes[0].set_ylabel("Predicted")
+    axes[0].set_title("Linear Regression")
+    axes[0].grid(alpha=0.3)
+
+    # Scatter: NN
+    axes[1].scatter(y_test, nn_pred, alpha=0.6, s=20, color='orange')
+    mn, mx = min(y_test.min(), nn_pred.min()), max(y_test.max(), nn_pred.max())
+    axes[1].plot([mn, mx], [mn, mx], 'k--')
+    axes[1].set_xlabel("Actual")
+    axes[1].set_ylabel("Predicted")
+    axes[1].set_title("Neural Network")
+    axes[1].grid(alpha=0.3)
+
+    # Error comparison
+    lr_errors = np.abs(y_test - lr_pred)
+    nn_errors = np.abs(y_test - nn_pred)
+    axes[2].hist(lr_errors, bins=30, alpha=0.6, label='Linear Reg')
+    axes[2].hist(nn_errors, bins=30, alpha=0.6, label='Neural Net')
+    axes[2].set_xlabel("Absolute Error")
+    axes[2].set_ylabel("Frequency")
+    axes[2].set_title("Error Distribution")
+    axes[2].legend()
+    axes[2].grid(alpha=0.3)
+
+    plt.suptitle(f"Model Comparison: {target_name}")
+    plt.tight_layout()
+
+    out = PROJECT_ROOT / f"comparison_{target_name.replace(' ', '_')}.png"
+    plt.savefig(out, dpi=100)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+def run_comparison(name, folder, target_col, drop_cols):
+    """Run full comparison for a dataset."""
+    print(f"\n{'='*60}")
+    print(f"Loading: {name}")
+    print('='*60)
+
+    X_train, y_train, X_test, y_test, dates, features = load_data(
+        folder, target_col, drop_cols
+    )
+
+    print(f"Train: {len(X_train)} | Test: {len(X_test)} | Features: {len(features)}")
+
+    # Train models
+    print("Training Linear Regression...")
+    lr_pred = train_linear_regression(X_train, y_train, X_test)
+
+    print("Training Neural Network...")
+    nn_pred = train_neural_network(X_train, y_train, X_test)
+
+    # Evaluate
+    lr_metrics = evaluate_model(y_test, lr_pred, "Linear Regression")
+    nn_metrics = evaluate_model(y_test, nn_pred, "Neural Network")
+
+    # Print results
+    print_comparison(lr_metrics, nn_metrics, name)
+
+    # Plot
+    plot_comparison(y_test, lr_pred, nn_pred, name)
+
+    return {
+        "name": name,
+        "lr": lr_metrics,
+        "nn": nn_metrics
+    }
 
 
 def main():
-    print("Loading data...")
-    X_train, y_train, X_test, y_test, test_dates = load_data()
+    results = []
 
-    print("Training Linear Regression...")
-    lr_predictions = train_linear_regression(X_train, y_train, X_test)
+    results.append(run_comparison(
+        "Savanna Temperature",
+        "savanna_preserve",
+        "temperature_2m",
+        ["relative_humidity_2m"]
+    ))
 
-    print("Training Neural Network...")
-    nn_predictions = train_neural_network(X_train, y_train, X_test)
+    results.append(run_comparison(
+        "Urban AQI",
+        "clean_urban_air",
+        "us_aqi",
+        ["relative_humidity_2m"]
+    ))
 
-    print("Saving predictions to CSV...")
-    save_predictions_csv(y_test, lr_predictions, nn_predictions, test_dates)
+    results.append(run_comparison(
+        "Resilient Irradiance",
+        "resilient_fields",
+        "global_tilted_irradiance",
+        ["precipitation"]
+    ))
 
-    print("Generating comparison plots...")
-    plot_comparison(y_test, lr_predictions, nn_predictions)
+    results.append(run_comparison(
+        "Resilient Precipitation",
+        "resilient_fields",
+        "precipitation",
+        ["global_tilted_irradiance"]
+    ))
+
+    # Summary
+    print("\n" + "="*60)
+    print("SUMMARY")
+    print("="*60)
+    print(f"\n{'Dataset':<25} {'LR R²':>10} {'NN R²':>10} {'Winner':>10}")
+    print("-" * 55)
+    for r in results:
+        winner = "NN" if r["nn"]["r2"] > r["lr"]["r2"] else "LR"
+        print(f"{r['name']:<25} {r['lr']['r2']:>10.4f} {r['nn']['r2']:>10.4f} {winner:>10}")
 
 
 if __name__ == "__main__":

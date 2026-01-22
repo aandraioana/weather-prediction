@@ -1,164 +1,107 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import statsmodels.api as sm
+"""Feature importance analysis using Random Forest and Linear Regression."""
+
 import pandas as pd
-from pathlib import Path
+import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import mutual_info_regression
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
-# Get project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-Xurban = pd.read_csv(PROJECT_ROOT / "data/clean_urban_air/2_X_test.csv")
 
-Xfield = pd.read_csv(PROJECT_ROOT / "data/resilient_fields/3_X_train.csv")
-yurban = pd.read_csv(PROJECT_ROOT / "data/clean_urban_air/2_y_test.csv")
+def load_data(folder, target_col, drop_cols):
+    """Load training data."""
+    train_df = pd.read_csv(PROJECT_ROOT / f"data/{folder}/train.csv")
 
-urban = pd.read_csv(PROJECT_ROOT / "data/savanna_preserve/1_y_test.csv")
-yfield = pd.read_csv(PROJECT_ROOT / "data/resilient_fields/3_y_train.csv")
+    # Handle season encoding
+    if "season" in train_df.columns:
+        season_map = {"winter": 1, "spring": 2, "summer": 3, "fall": 4, "autumn": 4}
+        train_df["season"] = train_df["season"].str.lower().map(season_map)
 
-print("Urban Dataset Info:")
-print(f"Features shape: {Xurban.shape}")
-print(f"Target shape: {yurban.shape}")
-print(f"Features columns: {list(Xurban.columns)}")
-print(f"Target columns: {list(yurban.columns)}")
+    feature_cols = [
+        c for c in train_df.columns
+        if c not in ["date", "location_id", target_col] + drop_cols
+    ]
 
-# Prepare the data
-# First, let's examine the data types
-print(f"\nXurban data types:")
-print(Xurban.dtypes)
-print(f"\nurban data types:")
-print(urban.dtypes)
+    X = train_df[feature_cols].fillna(0)
+    y = train_df[target_col].values
 
-# Remove location_id and handle datetime columns
-X = Xurban.copy()
-X = X.drop(['Unnamed: 0'], axis=1)
-# Remove location_id if it exists
-if 'location_id' in X.columns:
-    X = X.drop(['location_id'], axis=1)
+    return X, y, feature_cols
 
-# Handle datetime columns
-datetime_columns = []
-for col in X.columns:
-    if X[col].dtype == 'object':
-        # Try to convert to datetime
-        try:
-            pd.to_datetime(X[col])
-            datetime_columns.append(col)
-            print(f"Found datetime column: {col}")
-        except:
-            # If it's not datetime, check if it's categorical
-            if X[col].nunique() < 20:  # Assume categorical if less than 20 unique values
-                print(f"Found categorical column: {col}, unique values: {X[col].unique()}")
-                # Convert categorical to numeric
-                X[col] = pd.Categorical(X[col]).codes
-            else:
-                print(f"Warning: Could not handle column {col}, dropping it")
-                X = X.drop([col], axis=1)
 
-# Remove datetime columns
-if datetime_columns:
-    print(f"Removing datetime columns: {datetime_columns}")
-    X = X.drop(datetime_columns, axis=1)
+def analyze_importance(name, folder, target_col, drop_cols):
+    """Analyze feature importance for a dataset."""
+    print(f"\n{'='*60}")
+    print(f"FEATURE IMPORTANCE: {name}")
+    print('='*60)
 
-# Convert remaining object columns to numeric if possible
-for col in X.columns:
-    if X[col].dtype == 'object':
-        try:
-            X[col] = pd.to_numeric(X[col], errors='coerce')
-        except:
-            print(f"Warning: Could not convert {col} to numeric, dropping it")
-            X = X.drop([col], axis=1)
+    X, y, features = load_data(folder, target_col, drop_cols)
+    print(f"Features: {len(features)} | Samples: {len(X)}")
 
-# Remove any rows with NaN values
-initial_shape = X.shape[0]
-X = X.dropna()
-if X.shape[0] != initial_shape:
-    print(f"Removed {initial_shape - X.shape[0]} rows with NaN values")
+    # Random Forest importance
+    print("\n--- Random Forest Importance ---")
+    rf = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10, n_jobs=-1)
+    rf.fit(X, y)
 
-# Get target variable
-if 'us_aqi' in urban.columns:
-    y = urban['us_aqi']
-else:
-    y = urban.iloc[:, 0]  # Take first column if temperature_2m doesn't exist
+    rf_importance = pd.Series(rf.feature_importances_, index=features).sort_values(ascending=False)
 
-# Align target with features (in case we dropped rows)
-y = y.iloc[X.index]
+    print("\nTop 10 Most Important Features:")
+    for i, (feat, imp) in enumerate(rf_importance.head(10).items()):
+        print(f"  {i+1:2d}. {feat:<45} {imp:.4f}")
 
-print(f"\nFinal data shapes after cleaning:")
-print(f"X (features): {X.shape}")
-print(f"y (target): {y.shape}")
-print(f"Feature columns: {list(X.columns)}")
+    # Linear Regression coefficients
+    print("\n--- Linear Regression Coefficients ---")
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-# Check for any remaining non-numeric data
-print(f"\nFinal data types:")
-print(X.dtypes)
+    lr = LinearRegression()
+    lr.fit(X_scaled, y)
 
-# Ensure all features are numeric
-if not all(X.dtypes.apply(lambda x: np.issubdtype(x, np.number))):
-    print("Warning: Some columns are still not numeric!")
-    for col in X.columns:
-        if not np.issubdtype(X[col].dtype, np.number):
-            print(f"Non-numeric column: {col} (type: {X[col].dtype})")
-            X = X.drop([col], axis=1)
+    lr_importance = pd.Series(np.abs(lr.coef_), index=features).sort_values(ascending=False)
 
-# =============================================================================
-# METHOD 1: Random Forest Feature Importance
-# =============================================================================
+    print("\nTop 10 by Absolute Coefficient:")
+    for i, (feat, coef) in enumerate(lr_importance.head(10).items()):
+        print(f"  {i+1:2d}. {feat:<45} {coef:.4f}")
 
-print("\n" + "="*60)
-print("RANDOM FOREST FEATURE IMPORTANCE - urban DATA")
-print("="*60)
+    return rf_importance, lr_importance
 
-# Check if we have any features left
-if X.shape[1] == 0:
-    print("Error: No valid numeric features found!")
-    exit()
 
-# Train Random Forest
-rf = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10)
-rf.fit(X, y)
+def main():
+    # Savanna - Temperature
+    analyze_importance(
+        "Savanna Temperature",
+        "savanna_preserve",
+        "temperature_2m",
+        ["relative_humidity_2m"]
+    )
 
-# Get feature importance
-rf_importance = pd.Series(
-    rf.feature_importances_,
-    index=X.columns
-).sort_values(ascending=False)
+    # Urban - AQI
+    analyze_importance(
+        "Urban AQI",
+        "clean_urban_air",
+        "us_aqi",
+        ["relative_humidity_2m"]
+    )
 
-print("\nTop 15 Most Important Features (Random Forest):")
-print("-" * 50)
-for i, (feature, importance) in enumerate(rf_importance.head(15).items()):
-    print(f"{i+1:2d}. {feature:<40} {importance:.6f}")
+    # Resilient - Irradiance
+    analyze_importance(
+        "Resilient Irradiance",
+        "resilient_fields",
+        "global_tilted_irradiance",
+        ["precipitation"]
+    )
 
-# =============================================================================
-# METHOD 2: Linear Regression Coefficients
-# =============================================================================
+    # Resilient - Precipitation
+    analyze_importance(
+        "Resilient Precipitation",
+        "resilient_fields",
+        "precipitation",
+        ["global_tilted_irradiance"]
+    )
 
-print("\n" + "="*60)
-print("LINEAR REGRESSION COEFFICIENTS - urban DATA")
-print("="*60)
 
-# Standardize features for fair coefficient comparison
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-X_scaled_df = pd.DataFrame(X_scaled, columns=X.columns)
-
-# Train Linear Regression
-lr = LinearRegression()
-lr.fit(X_scaled_df, y)
-
-# Get feature importance as absolute coefficients
-lr_importance = pd.Series(
-    np.abs(lr.coef_),
-    index=X.columns
-).sort_values(ascending=False)
-
-print("\nTop 15 Most Important Features (Linear Regression - Absolute Coefficients):")
-print("-" * 70)
-for i, (feature, importance) in enumerate(lr_importance.head(15).items()):
-    print(f"{i+1:2d}. {feature:<40} {importance:.6f}")
+if __name__ == "__main__":
+    main()

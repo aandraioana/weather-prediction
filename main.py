@@ -11,7 +11,7 @@ Usage:
     python main.py [command]
 
 Commands:
-    train       - Train the linear regression model (default)
+    linear      - Train the linear regression model (default)
     nn          - Train the neural network model
     compare     - Compare linear regression vs neural network
     features    - Run feature engineering
@@ -26,14 +26,13 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent
 
-
 def run_module(module_path: str):
     """Run a Python module as a script."""
     subprocess.run([sys.executable, str(PROJECT_ROOT / module_path)], check=True)
 
 
 def main():
-    command = sys.argv[1] if len(sys.argv) > 1 else "train"
+    command = sys.argv[1] if len(sys.argv) > 1 else "linear"
 
     commands = {
         "linear": "src/models/linear_regression.py",

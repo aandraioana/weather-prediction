@@ -1,78 +1,45 @@
 import pandas as pd
-import torch
-import torch.nn as nn
 import numpy as np
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 from pathlib import Path
 import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 VAL_SPLIT = 0.2
 
+# Simplified configs using sklearn MLPRegressor
 CONFIGS = {
     "savanna_temperature": {
-        "hidden_layers": [128, 64, 32],
+        "hidden_layers": (64, 32),
         "learning_rate": 0.001,
-        "epochs": 1000,
-        "batch_size": 32,
-        "dropout_rate": 0.1,
-        "patience": 50,
-        "use_log_target": False,
+        "max_iter": 500,
+        "early_stopping": True,
     },
     "urban_aqi": {
-        "hidden_layers": [128, 64, 32],
+        "hidden_layers": (64, 32),
         "learning_rate": 0.001,
-        "epochs": 1000,
-        "batch_size": 32,
-        "dropout_rate": 0.1,
-        "patience": 50,
-        "use_log_target": False,
+        "max_iter": 500,
+        "early_stopping": True,
     },
     "resilient_irradiance": {
-        "hidden_layers": [256, 128, 64],
+        "hidden_layers": (64, 32),
         "learning_rate": 0.001,
-        "epochs": 1000,
-        "batch_size": 32,
-        "dropout_rate": 0.2,
-        "patience": 50,
-        "use_log_target": False,
+        "max_iter": 500,
+        "early_stopping": True,
     },
     "resilient_precipitation": {
-        "hidden_layers": [32],
+        "hidden_layers": (32,),
         "learning_rate": 0.001,
-        "epochs": 2000,
-        "batch_size": 32,
-        "dropout_rate": 0.0,
-        "patience": 150,
-        "use_log_target": False,
+        "max_iter": 1000,
+        "early_stopping": True,
     },
 }
-
-
-class WeatherPredictor(nn.Module):
-    def __init__(self, input_size, hidden_layers, output_size, dropout_rate=0.0):
-        super().__init__()
-
-        layers = []
-        prev = input_size
-
-        for h in hidden_layers:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.BatchNorm1d(h))
-            layers.append(nn.ReLU())
-            if dropout_rate > 0:
-                layers.append(nn.Dropout(dropout_rate))
-            prev = h
-
-        layers.append(nn.Linear(prev, output_size))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
 
 
 # =========================
@@ -86,17 +53,14 @@ def extract_time_features(df):
 
     df["date"] = pd.to_datetime(df["date"])
 
-    # Extract hour (0-23) - important for rush hour patterns
     hour = df["date"].dt.hour
     df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
 
-    # Extract day of week (0=Monday, 6=Sunday) - weekday vs weekend
     dow = df["date"].dt.dayofweek
     df["dow_sin"] = np.sin(2 * np.pi * dow / 7)
     df["dow_cos"] = np.cos(2 * np.pi * dow / 7)
 
-    # Binary weekend flag
     df["is_weekend"] = (dow >= 5).astype(int)
 
     return df
@@ -110,7 +74,7 @@ def add_cyclical_encoding(df):
 
     if "season" in df.columns:
         if df["season"].dtype == object:
-            season_map = {"winter":1, "spring":2, "summer":3, "fall":4, "autumn":4}
+            season_map = {"winter": 1, "spring": 2, "summer": 3, "fall": 4, "autumn": 4}
             df["season"] = df["season"].str.lower().map(season_map)
         df["season_sin"] = np.sin(2 * np.pi * df["season"] / 4)
         df["season_cos"] = np.cos(2 * np.pi * df["season"] / 4)
@@ -134,14 +98,9 @@ def add_lag_differences(df, prefix):
 
 def preprocess_features(df):
     df = df.copy()
-
-    # Extract time features (hour, day of week) from date
     df = extract_time_features(df)
-
-    # Cyclical encoding for month/season
     df = add_cyclical_encoding(df)
 
-    # Add lag differences
     for col in df.columns:
         if "_previous_day1" in col:
             prefix = col.replace("_previous_day1", "")
@@ -154,7 +113,7 @@ def preprocess_features(df):
 # Dataset
 # =========================
 
-def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
+def load_dataset(folder, target_cols, drop_cols):
     base = PROJECT_ROOT / f"data/{folder}"
 
     train_df = pd.read_csv(base / "train.csv")
@@ -172,36 +131,16 @@ def load_dataset(folder, target_cols, drop_cols, use_log_target=False):
     ]
 
     X_train = train_df[feature_cols].fillna(0).values
-    y_train = train_df[target_cols].values
+    y_train = train_df[target_cols].values.ravel()
     X_test = test_df[feature_cols].fillna(0).values
-    y_test = test_df[target_cols].values
+    y_test = test_df[target_cols].values.ravel()
 
-    if use_log_target:
-        y_train = np.log1p(y_train)
-        y_test = np.log1p(y_test)
-
-    return X_train, y_train, X_test, y_test, feature_cols, use_log_target
+    return X_train, y_train, X_test, y_test, feature_cols
 
 
 # =========================
 # Plotting
 # =========================
-
-def plot_training_curves(train_losses, val_losses, name):
-    plt.figure(figsize=(8, 5))
-    plt.plot(train_losses, label="Train")
-    plt.plot(val_losses, label="Validation")
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE")
-    plt.title(f"Training Curves – {name}")
-    plt.legend()
-    plt.grid(alpha=0.3)
-
-    out = PROJECT_ROOT / f"training_curve_{name.replace(' ', '_')}.png"
-    plt.savefig(out, dpi=150)
-    plt.close()
-    print(f"Saved: {out}")
-
 
 def plot_predictions(y_true, y_pred, name):
     plt.figure(figsize=(6, 6))
@@ -214,7 +153,7 @@ def plot_predictions(y_true, y_pred, name):
     plt.grid(alpha=0.3)
 
     out = PROJECT_ROOT / f"pred_vs_actual_{name.replace(' ', '_')}.png"
-    plt.savefig(out, dpi=150)
+    plt.savefig(out, dpi=100)
     plt.close()
     print(f"Saved: {out}")
 
@@ -230,7 +169,7 @@ def plot_error_hist(y_true, y_pred, name):
     plt.grid(alpha=0.3)
 
     out = PROJECT_ROOT / f"error_hist_{name.replace(' ', '_')}.png"
-    plt.savefig(out, dpi=150)
+    plt.savefig(out, dpi=100)
     plt.close()
     print(f"Saved: {out}")
 
@@ -242,113 +181,62 @@ def plot_error_hist(y_true, y_pred, name):
 def run_experiment(name, folder, targets, drop_cols, config_name):
     cfg = CONFIGS[config_name]
 
-    X_train_full, y_train_full, X_test, y_test, features, use_log = load_dataset(
-        folder, targets, drop_cols, use_log_target=cfg['use_log_target']
-    )
+    print(f"\n{'='*60}")
+    print(f"Training: {name}")
+    print('='*60)
 
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_full, y_train_full, test_size=VAL_SPLIT
-    )
+    X_train, y_train, X_test, y_test, features = load_dataset(folder, targets, drop_cols)
 
+    print(f"Train samples: {len(X_train)}")
+    print(f"Test samples: {len(X_test)}")
+    print(f"Features: {len(features)}")
+
+    # Scale features
     scaler_X = StandardScaler()
+
     X_train_s = scaler_X.fit_transform(X_train)
-    X_val_s = scaler_X.transform(X_val)
     X_test_s = scaler_X.transform(X_test)
 
-    scaler_y = StandardScaler()
-    y_train_s = scaler_y.fit_transform(y_train)
-    y_val_s = scaler_y.transform(y_val)
-    y_test_s = scaler_y.transform(y_test)
-
-    train_loader = DataLoader(
-        TensorDataset(
-            torch.tensor(X_train_s.tolist(), dtype=torch.float32),
-            torch.tensor(y_train_s.tolist(), dtype=torch.float32)
-        ),
-        batch_size=cfg['batch_size'], shuffle=True
+    # Create and train model
+    model = MLPRegressor(
+        hidden_layer_sizes=cfg['hidden_layers'],
+        learning_rate_init=cfg['learning_rate'],
+        max_iter=cfg['max_iter'],
+        early_stopping=cfg['early_stopping'],
+        validation_fraction=VAL_SPLIT,
+        random_state=42,
+        verbose=False
     )
 
-    val_loader = DataLoader(
-        TensorDataset(
-            torch.tensor(X_val_s.tolist(), dtype=torch.float32),
-            torch.tensor(y_val_s.tolist(), dtype=torch.float32)
-        ),
-        batch_size=cfg['batch_size']
-    )
+    model.fit(X_train_s, y_train)
 
-    model = WeatherPredictor(X_train_s.shape[1], cfg['hidden_layers'], y_train.shape[1], cfg['dropout_rate'])
+    # Predict
+    y_pred = model.predict(X_test_s)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'])
-    criterion = nn.MSELoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20)
+    # Evaluate
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
 
-    train_losses, val_losses = [], []
+    target_range = y_test.max() - y_test.min()
+    thresh_5pct = target_range * 0.05
+    thresh_10pct = target_range * 0.10
+    acc_5 = np.mean(np.abs(y_test - y_pred) <= thresh_5pct) * 100
+    acc_10 = np.mean(np.abs(y_test - y_pred) <= thresh_10pct) * 100
 
-    best_loss = float("inf")
-    patience_counter = 0
-    best_state = None
+    print(f"\nResults:")
+    print(f"  MSE: {mse:.2f}")
+    print(f"  R²: {r2:.4f}")
+    print(f"  Accuracy ±5%: {acc_5:.1f}%")
+    print(f"  Accuracy ±10%: {acc_10:.1f}%")
+    print(f"  Iterations: {model.n_iter_}")
 
-    for epoch in range(cfg['epochs']):
-        model.train()
-        t_loss = 0
-
-        for xb, yb in train_loader:
-            optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-            t_loss += loss.item()
-
-        model.eval()
-        v_loss = 0
-        with torch.no_grad():
-            for xb, yb in val_loader:
-                v_loss += criterion(model(xb), yb).item()
-
-        t_loss /= len(train_loader)
-        v_loss /= len(val_loader)
-
-        train_losses.append(t_loss)
-        val_losses.append(v_loss)
-
-        scheduler.step(v_loss)
-
-        if v_loss < best_loss:
-            best_loss = v_loss
-            best_state = model.state_dict()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-
-        if patience_counter >= cfg['patience']:
-            break
-
-    model.load_state_dict(best_state)
-
-    with torch.no_grad():
-        preds = model(torch.tensor(X_test_s.tolist(), dtype=torch.float32)).tolist()
-
-    preds_orig = scaler_y.inverse_transform(preds)
-    y_test_orig = scaler_y.inverse_transform(y_test_s)
-
-    if use_log:
-        preds_orig = np.expm1(preds_orig)
-        y_test_orig = np.expm1(y_test_orig)
-
-    mse = mean_squared_error(y_test_orig, preds_orig)
-    r2 = r2_score(y_test_orig, preds_orig)
-
-    print(f"\n{name} → MSE: {mse:.2f} | R²: {r2:.4f}")
-
-    plot_training_curves(train_losses, val_losses, name)
-    plot_predictions(y_test_orig[:, 0], preds_orig[:, 0], name)
-    plot_error_hist(y_test_orig[:, 0], preds_orig[:, 0], name)
+    plot_predictions(y_test, y_pred, name)
+    plot_error_hist(y_test, y_pred, name)
 
 
 def main():
     run_experiment(
-        "Savanna Preserve - Temperature",
+        "Savanna Temperature",
         "savanna_preserve",
         ["temperature_2m"],
         ["relative_humidity_2m"],
@@ -356,7 +244,7 @@ def main():
     )
 
     run_experiment(
-        "Clean Urban Air - AQI",
+        "Urban AQI",
         "clean_urban_air",
         ["us_aqi"],
         ["relative_humidity_2m"],
@@ -364,7 +252,7 @@ def main():
     )
 
     run_experiment(
-        "Resilient Fields - Irradiance",
+        "Resilient Irradiance",
         "resilient_fields",
         ["global_tilted_irradiance"],
         ["precipitation"],
@@ -372,7 +260,7 @@ def main():
     )
 
     run_experiment(
-        "Resilient Fields - Precipitation",
+        "Resilient Precipitation",
         "resilient_fields",
         ["precipitation"],
         ["global_tilted_irradiance"],

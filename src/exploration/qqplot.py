@@ -1,66 +1,113 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
+"""Q-Q plots for comparing distributions of weather features."""
+
+import pandas as pd
 import numpy as np
 import statsmodels.api as sm
-import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
 
-# Get project root directory
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-urban = pd.read_csv(PROJECT_ROOT / "data/clean_urban_air/2_X_test.csv")
 
-savannah = pd.read_csv(PROJECT_ROOT / "data/savanna_preserve/1_X_test.csv")
-field = pd.read_csv(PROJECT_ROOT / "data/resilient_fields/3_X_train.csv")
-print(field.head())
-X = pd.read_csv(PROJECT_ROOT / "data/savanna_preserve/1_X_train.csv")
-X['date'] = pd.to_datetime(X['date'])
-X['hour'] = X['date'].dt.hour
-fig, axes = plt.subplots(4, 4, figsize=(20, 16))  # 4x4 grid to accommodate 7 days + 1 extra
-axes = axes.flatten()
+def load_data(folder):
+    """Load training data."""
+    train_df = pd.read_csv(PROJECT_ROOT / f"data/{folder}/train.csv")
+    train_df["date"] = pd.to_datetime(train_df["date"])
+    return train_df
 
-for day in range(1, 8):  # Days 1 to 7
-    # Column names
-    humidity_col = f'relative_humidity_2m_previous_day{day}'
-    temp_col = f'temperature_2m_previous_day{day}'
 
-    # First subplot - histograms
-    ax_hist = axes[(day - 1) * 2]
-    sns.histplot(X[humidity_col], color='blue', label=f'humidity Day {day}', kde=True, ax=ax_hist)
-    sns.histplot(X[temp_col], color='red', label=f'temperature Day {day}', kde=True, ax=ax_hist)
-    ax_hist.set_xlabel('Value')
-    ax_hist.set_ylabel('Frequency')
-    ax_hist.set_title(f'Day {day} - Distribution')
-    ax_hist.legend()
+def plot_qqplots(name, folder, feature1_prefix, feature2_prefix):
+    """Create Q-Q plots comparing two feature types across days."""
+    print(f"\n{'='*60}")
+    print(f"Q-Q PLOTS: {name}")
+    print('='*60)
 
-    # Outlier removal for humidity
-    q1_precip = np.percentile(X[humidity_col], 25)
-    q3_precip = np.percentile(X[humidity_col], 75)
-    iqr_precip = q3_precip - q1_precip
-    lower_bound_precip = q1_precip - 1.5 * iqr_precip
-    upper_bound_precip = q3_precip + 1.5 * iqr_precip
+    df = load_data(folder)
 
-    # Outlier removal for irradiance
-    q1_irrad = np.percentile(X[temp_col], 25)
-    q3_irrad = np.percentile(X[temp_col], 75)
-    iqr_irrad = q3_irrad - q1_irrad
-    lower_bound_irrad = q1_irrad - 1.5 * iqr_irrad
-    upper_bound_irrad = q3_irrad + 1.5 * iqr_irrad
+    # Find columns with both prefixes
+    cols1 = sorted([c for c in df.columns if f"{feature1_prefix}_previous_day" in c],
+                   key=lambda x: int(x.split("day")[-1]))
+    cols2 = sorted([c for c in df.columns if f"{feature2_prefix}_previous_day" in c],
+                   key=lambda x: int(x.split("day")[-1]))
 
-    # Filter data
-    data_filtered = X.loc[
-        (X[humidity_col] >= lower_bound_precip) & (X[humidity_col] <= upper_bound_precip) &
-        (X[temp_col] >= lower_bound_irrad) & (X[temp_col] <= upper_bound_irrad)
-        ]
+    n_days = min(len(cols1), len(cols2), 7)
 
-    # Second subplot - QQ plot
-    ax_qq = axes[(day - 1) * 2 + 1]
-    sm.qqplot_2samples(data_filtered[humidity_col], data_filtered[temp_col], ax=ax_qq)
-    ax_qq.set_title(f'Day {day} - QQ Plot (temperature vs humidity)')
+    if n_days == 0:
+        print(f"No matching columns found for {feature1_prefix} and {feature2_prefix}")
+        return
 
-# Hide extra subplots if any
-for i in range(14, 16):
-    axes[i].set_visible(False)
+    print(f"Comparing {n_days} days of {feature1_prefix} vs {feature2_prefix}")
 
-plt.tight_layout()
-plt.show()
+    fig, axes = plt.subplots(2, n_days, figsize=(4*n_days, 8))
+
+    for day in range(n_days):
+        col1 = cols1[day]
+        col2 = cols2[day]
+
+        data1 = df[col1].dropna()
+        data2 = df[col2].dropna()
+
+        # Histogram subplot
+        ax_hist = axes[0, day]
+        sns.histplot(data1, color='blue', alpha=0.5, label=feature1_prefix, kde=True, ax=ax_hist)
+        sns.histplot(data2, color='red', alpha=0.5, label=feature2_prefix, kde=True, ax=ax_hist)
+        ax_hist.set_title(f'Day {day+1} Distribution')
+        ax_hist.legend(fontsize=8)
+        ax_hist.set_xlabel('')
+
+        # Q-Q plot subplot
+        ax_qq = axes[1, day]
+
+        # Remove outliers for cleaner Q-Q plot
+        q1_1, q3_1 = np.percentile(data1, [25, 75])
+        iqr_1 = q3_1 - q1_1
+        mask1 = (data1 >= q1_1 - 1.5*iqr_1) & (data1 <= q3_1 + 1.5*iqr_1)
+
+        q1_2, q3_2 = np.percentile(data2, [25, 75])
+        iqr_2 = q3_2 - q1_2
+        mask2 = (data2 >= q1_2 - 1.5*iqr_2) & (data2 <= q3_2 + 1.5*iqr_2)
+
+        clean1 = data1[mask1].values
+        clean2 = data2[mask2].values
+
+        # Align lengths for Q-Q plot
+        min_len = min(len(clean1), len(clean2))
+        if min_len > 10:
+            sm.qqplot_2samples(clean1[:min_len], clean2[:min_len], ax=ax_qq)
+            ax_qq.set_title(f'Day {day+1} Q-Q')
+        else:
+            ax_qq.text(0.5, 0.5, 'Insufficient data', ha='center', va='center')
+            ax_qq.set_title(f'Day {day+1} Q-Q')
+
+    plt.suptitle(f'{name}: {feature1_prefix} vs {feature2_prefix}', fontsize=14)
+    plt.tight_layout()
+
+    out = PROJECT_ROOT / f"qqplot_{name.replace(' ', '_')}.png"
+    plt.savefig(out, dpi=100)
+    plt.close()
+    print(f"Saved: {out}")
+
+
+def main():
+    # Savanna: Temperature vs Humidity
+    plot_qqplots(
+        "Savanna",
+        "savanna_preserve",
+        "temperature_2m",
+        "relative_humidity_2m"
+    )
+
+    # Resilient Fields: Precipitation vs Irradiance
+    plot_qqplots(
+        "Resilient Fields",
+        "resilient_fields",
+        "precipitation",
+        "global_tilted_irradiance"
+    )
+
+
+if __name__ == "__main__":
+    main()
